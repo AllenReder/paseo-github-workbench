@@ -7,6 +7,16 @@ It gathers resources from your account or a selected repository, shows their
 GitHub state in a compact workbench, and can create or reopen a corresponding
 Paseo workspace for an issue or pull request.
 
+## Screenshots
+
+### Account workbench
+
+![Account workbench showing GitHub pull requests and issues](1.png)
+
+### Project workbench
+
+![Project workbench filtered to a selected repository](2.png)
+
 ## What it does
 
 - Lists open GitHub issues and pull requests for an account or repository.
