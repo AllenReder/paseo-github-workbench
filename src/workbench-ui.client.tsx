@@ -84,53 +84,63 @@ function usePaseoDirectory(hostId: string) {
     queryKey,
     staleTime: WORKBENCH_STALE_TIME_MS,
     queryFn: async () => {
-      const workspaces: WorkspaceSnapshot[] = [];
-      const agents: PaseoDirectorySnapshot["agents"] = [];
-      let workspaceCursor: string | undefined;
-      for (let page = 0; page < 10; page += 1) {
-        const response = await paseo.workspaces.list({
-          page: {
-            limit: 200,
-            ...(workspaceCursor ? { cursor: workspaceCursor } : {}),
-          },
-        });
-        workspaces.push(
-          ...response.entries.map((workspace) => ({
-            id: workspace.id,
-            projectId: workspace.projectId,
-            projectDisplayName: workspace.projectDisplayName,
-            name: workspace.name,
-            archivingAt: workspace.archivingAt,
-            remoteUrl: workspace.gitRuntime?.remoteUrl ?? null,
-            pullRequestNumber: workspace.githubRuntime?.pullRequest?.number,
-            worktreeSlug: workspace.worktreeSlug,
-            activityAt: workspace.activityAt,
-          })),
-        );
-        workspaceCursor = response.pageInfo.nextCursor ?? undefined;
-        if (!workspaceCursor) break;
-      }
-      let agentCursor: string | undefined;
-      for (let page = 0; page < 10; page += 1) {
-        const response = await paseo.agents.list({
-          page: { limit: 200, ...(agentCursor ? { cursor: agentCursor } : {}) },
-        });
-        agents.push(
-          ...response.entries.map(({ agent }) => ({
-            id: agent.id,
-            workspaceId: agent.workspaceId,
-            title: agent.title,
-            status: agent.status,
-            requiresAttention: agent.requiresAttention ?? false,
-            attentionReason: agent.attentionReason ?? null,
-            pendingPermissions: agent.pendingPermissions.length,
-            updatedAt: agent.updatedAt,
-            labels: agent.labels,
-          })),
-        );
-        agentCursor = response.pageInfo.nextCursor ?? undefined;
-        if (!agentCursor) break;
-      }
+      const workspacesPromise = (async () => {
+        const workspaces: WorkspaceSnapshot[] = [];
+        let cursor: string | undefined;
+        for (let page = 0; page < 10; page += 1) {
+          const response = await paseo.workspaces.list({
+            page: {
+              limit: 200,
+              ...(cursor ? { cursor } : {}),
+            },
+          });
+          workspaces.push(
+            ...response.entries.map((workspace) => ({
+              id: workspace.id,
+              projectId: workspace.projectId,
+              projectDisplayName: workspace.projectDisplayName,
+              name: workspace.name,
+              archivingAt: workspace.archivingAt,
+              remoteUrl: workspace.gitRuntime?.remoteUrl ?? null,
+              pullRequestNumber: workspace.githubRuntime?.pullRequest?.number,
+              worktreeSlug: workspace.worktreeSlug,
+              activityAt: workspace.activityAt,
+            })),
+          );
+          cursor = response.pageInfo.nextCursor ?? undefined;
+          if (!cursor) break;
+        }
+        return workspaces;
+      })();
+      const agentsPromise = (async () => {
+        const agents: PaseoDirectorySnapshot["agents"] = [];
+        let cursor: string | undefined;
+        for (let page = 0; page < 10; page += 1) {
+          const response = await paseo.agents.list({
+            page: { limit: 200, ...(cursor ? { cursor } : {}) },
+          });
+          agents.push(
+            ...response.entries.map(({ agent }) => ({
+              id: agent.id,
+              workspaceId: agent.workspaceId,
+              title: agent.title,
+              status: agent.status,
+              requiresAttention: agent.requiresAttention ?? false,
+              attentionReason: agent.attentionReason ?? null,
+              pendingPermissions: agent.pendingPermissions.length,
+              updatedAt: agent.updatedAt,
+              labels: agent.labels,
+            })),
+          );
+          cursor = response.pageInfo.nextCursor ?? undefined;
+          if (!cursor) break;
+        }
+        return agents;
+      })();
+      const [workspaces, agents] = await Promise.all([
+        workspacesPromise,
+        agentsPromise,
+      ]);
       return { workspaces, agents } satisfies PaseoDirectorySnapshot;
     },
   });
