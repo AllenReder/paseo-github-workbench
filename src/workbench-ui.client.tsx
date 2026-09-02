@@ -1170,6 +1170,7 @@ export function Workbench({
     queryKey: resourceDetailQueryKey(host.id, selected?.key ?? null),
     enabled: selected !== null,
     staleTime: RESOURCE_DETAIL_STALE_TIME_MS,
+    gcTime: RESOURCE_DETAIL_STALE_TIME_MS,
     queryFn: async () => {
       if (!selected) throw new Error("No GitHub resource is selected.");
       const summaryVersion = githubResourceVersion(selected);
