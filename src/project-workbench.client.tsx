@@ -30,11 +30,13 @@ function ProjectGitHubWorkbenchPanelInner(props: PluginWorkspacePanelProps) {
         filter: { idPrefix: props.workspaceId },
         page: { limit: 20 },
       });
-      return (
-        response.entries.find(
-          (workspace) => workspace.id === props.workspaceId,
-        ) ?? null
+      const match = response.entries.find(
+        (workspace) => workspace.id === props.workspaceId,
       );
+      // Older daemons accept idPrefix as a compatibility field but may not
+      // apply it server-side. Preserve correctness with the legacy scan when
+      // the fast path does not return an exact workspace.
+      return match ?? paseo.workspaces.ref(props.workspaceId).refresh();
     },
   });
   // The plugin workspace snapshot intentionally omits git runtime details, so
