@@ -1,5 +1,7 @@
 # Paseo GitHub Workbench
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 GitHub Workbench is a [Paseo](https://github.com/getpaseo/paseo) plugin for
 working with GitHub issues and pull requests without leaving Paseo.
 
@@ -44,6 +46,11 @@ detail action opens an existing Paseo workspace or creates one when needed.
   see. Accessing private repositories requires a token with the corresponding
   repository permissions.
 - Git installed for workspace and worktree actions.
+
+## Known limitations
+
+- GitHub Workbench supports GitHub only and relies on the GitHub CLI (gh) on
+  the Paseo daemon host. Other code-hosting providers are not supported.
 
 ## Install
 
