@@ -18,7 +18,7 @@ Use Bun and run all checks before requesting review:
     bun install --frozen-lockfile
     bun run check
     bun run typecheck
-    bun test
+    bun run test
 
 ## Plugin compatibility
 

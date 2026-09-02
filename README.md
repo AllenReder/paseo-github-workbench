@@ -53,14 +53,14 @@ with the Paseo CLI:
     bun install --frozen-lockfile
     bun run check
     bun run typecheck
-    bun test
+    bun run test
     paseo plugin install /absolute/path/to/paseo-github-workbench
 
 ## Development
 
     bun run check
     bun run typecheck
-    bun test
+    bun run test
 
 The plugin's public host contracts are represented locally by
 paseo-plugin.d.ts. Regenerate that file with the matching Paseo CLI when

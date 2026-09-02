@@ -6,7 +6,7 @@ Describe the user-visible problem and the change.
 
 - [ ] bun run check
 - [ ] bun run typecheck
-- [ ] bun test
+- [ ] bun run test
 - [ ] UI evidence included, or not applicable
 
 ## Compatibility and security
