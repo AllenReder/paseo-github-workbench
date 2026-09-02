@@ -9,6 +9,10 @@ It gathers resources from your account or a selected repository, shows their
 GitHub state in a compact workbench, and can create or reopen a corresponding
 Paseo workspace for an issue or pull request.
 
+## Screenshot
+
+![GitHub Workbench two-pane interface](.github/assets/workbench.png)
+
 ## Interface
 
 The responsive dark workbench uses a Codex-style two-pane layout: a left pane

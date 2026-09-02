@@ -6,6 +6,10 @@ GitHub Workbench 是一个 [Paseo](https://github.com/getpaseo/paseo) 插件，�
 
 它会汇集你的账户或所选仓库中的资源，以紧凑的工作台形式展示 GitHub 状态；并能为某个 Issue 或拉取请求创建或重新打开对应的 Paseo 工作区。
 
+## 截图
+
+![GitHub Workbench 双栏工作台界面](.github/assets/workbench.png)
+
 ## 界面与布局
 
 响应式深色工作台采用类似 Codex 的双栏设计：左侧面板列出 GitHub Issue 和拉取请求，右侧面板展示所选资源的元数据、正文描述以及关联的详细信息。在宽屏布局下，默认采用 1:1 等分比例，并可通过拖动可见的分隔线在 30% 至 70% 之间调整列表宽度；在紧凑布局下，点击资源将直接打开详情面板，并提供返回列表的快捷操作。
