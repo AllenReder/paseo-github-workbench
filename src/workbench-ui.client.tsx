@@ -1172,7 +1172,12 @@ export function Workbench({
   const detailIsBehindSummary = Boolean(
     selected &&
       detailResource &&
-      isGitHubResourceDetailStale(selected, detailResource),
+      isGitHubResourceDetailStale(
+        selected,
+        detailResource,
+        query.dataUpdatedAt,
+        selectedDetailQuery.dataUpdatedAt,
+      ),
   );
   const selectedForDetail =
     selected && detailResource && !detailIsBehindSummary

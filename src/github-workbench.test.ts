@@ -232,6 +232,8 @@ describe("GitHub workbench shared primitives", () => {
         }),
       ),
     ).toBe(false);
+    expect(isGitHubResourceDetailStale(summary, detail, 200, 100)).toBe(true);
+    expect(isGitHubResourceDetailStale(summary, detail, 100, 200)).toBe(false);
   });
 
   test("formats accessibility labels properly", () => {
