@@ -96,8 +96,10 @@ export function applyWorkspaceUpdate(
   if (index < 0) {
     return { ...snapshot, workspaces: [...snapshot.workspaces, workspace] };
   }
-  const workspaces = snapshot.workspaces.slice();
-  workspaces[index] = workspace;
+  const workspaces = snapshot.workspaces.filter(
+    (entry) => entry.id !== workspace.id,
+  );
+  workspaces.splice(Math.min(index, workspaces.length), 0, workspace);
   return { ...snapshot, workspaces };
 }
 
@@ -116,8 +118,8 @@ export function applyAgentUpdate(
   if (index < 0) {
     return { ...snapshot, agents: [...snapshot.agents, agent] };
   }
-  const agents = snapshot.agents.slice();
-  agents[index] = agent;
+  const agents = snapshot.agents.filter((entry) => entry.id !== agent.id);
+  agents.splice(Math.min(index, agents.length), 0, agent);
   return { ...snapshot, agents };
 }
 

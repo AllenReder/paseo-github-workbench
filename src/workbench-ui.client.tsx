@@ -99,9 +99,13 @@ function usePaseoDirectory(hostId: string) {
     () => `github-workbench:${hostId}:agents`,
     [hostId],
   );
+  const [subscriptionsReadyHost, setSubscriptionsReadyHost] = useState<
+    string | null
+  >(null);
   const fetchTransactions = useRef<Set<DirectoryFetchTransaction>>(new Set());
   const query = useQuery({
     queryKey,
+    enabled: subscriptionsReadyHost === hostId,
     staleTime: WORKBENCH_STALE_TIME_MS,
     refetchInterval: DIRECTORY_RECONCILE_INTERVAL_MS,
     refetchIntervalInBackground: false,
@@ -113,7 +117,7 @@ function usePaseoDirectory(hostId: string) {
       fetchTransactions.current.add(transaction);
       try {
         const workspacesPromise = (async () => {
-          const workspaces: WorkspaceSnapshot[] = [];
+          const workspaces = new Map<string, WorkspaceSnapshot>();
           let cursor: string | undefined;
           for (let page = 0; page < 10; page += 1) {
             const response = await paseo.workspaces.list({
@@ -125,14 +129,20 @@ function usePaseoDirectory(hostId: string) {
                 ...(cursor ? { cursor } : {}),
               },
             });
-            workspaces.push(...response.entries.map(toWorkspaceSnapshot));
+            for (const workspace of response.entries) {
+              const snapshot = toWorkspaceSnapshot(workspace);
+              workspaces.set(snapshot.id, snapshot);
+            }
             cursor = response.pageInfo.nextCursor ?? undefined;
             if (!cursor) break;
           }
-          return workspaces;
+          return [...workspaces.values()];
         })();
         const agentsPromise = (async () => {
-          const agents: PaseoDirectorySnapshot["agents"] = [];
+          const agents = new Map<
+            string,
+            PaseoDirectorySnapshot["agents"][number]
+          >();
           let cursor: string | undefined;
           for (let page = 0; page < 10; page += 1) {
             const response = await paseo.agents.list({
@@ -141,18 +151,27 @@ function usePaseoDirectory(hostId: string) {
                 : {}),
               page: { limit: 200, ...(cursor ? { cursor } : {}) },
             });
-            agents.push(
-              ...response.entries.map(({ agent }) => toAgentSnapshot(agent)),
-            );
+            for (const { agent } of response.entries) {
+              const snapshot = toAgentSnapshot(agent);
+              agents.set(snapshot.id, snapshot);
+            }
             cursor = response.pageInfo.nextCursor ?? undefined;
             if (!cursor) break;
           }
-          return agents;
+          return [...agents.values()];
         })();
-        const [workspaces, agents] = await Promise.all([
+        const [workspacesResult, agentsResult] = await Promise.allSettled([
           workspacesPromise,
           agentsPromise,
         ]);
+        if (workspacesResult.status === "rejected") {
+          throw workspacesResult.reason;
+        }
+        if (agentsResult.status === "rejected") {
+          throw agentsResult.reason;
+        }
+        const { value: workspaces } = workspacesResult;
+        const { value: agents } = agentsResult;
         let snapshot = { workspaces, agents } satisfies PaseoDirectorySnapshot;
         for (const update of transaction.workspaceUpdates) {
           snapshot = applyWorkspaceUpdate(snapshot, update);
@@ -183,11 +202,15 @@ function usePaseoDirectory(hostId: string) {
         snapshot ? applyAgentUpdate(snapshot, update) : snapshot,
       );
     });
+    setSubscriptionsReadyHost(hostId);
     return () => {
       stopWorkspaces();
       stopAgents();
+      setSubscriptionsReadyHost((current) =>
+        current === hostId ? null : current,
+      );
     };
-  }, [paseo, queryClient, queryKey]);
+  }, [hostId, paseo, queryClient, queryKey]);
   return query;
 }
 
