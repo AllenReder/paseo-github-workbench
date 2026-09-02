@@ -33,8 +33,13 @@ function ProjectGitHubWorkbenchPanelInner(props: PluginWorkspacePanelProps) {
   const currentRepository = normalizeGitHubRepository(
     currentWorkspaceQuery.data?.gitRuntime?.remoteUrl,
   );
+  const repositoriesProjectId = currentWorkspaceQuery.isPending
+    ? null
+    : currentRepository
+      ? null
+      : (workspace?.projectId ?? null);
   const repositories = useProjectRepositories(
-    workspace?.projectId ?? null,
+    repositoriesProjectId,
     props.host.id,
     currentRepository,
   );

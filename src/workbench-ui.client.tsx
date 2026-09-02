@@ -1799,7 +1799,7 @@ export function useProjectRepositories(
   );
   const query = useQuery({
     queryKey,
-    enabled: Boolean(projectId),
+    enabled: Boolean(projectId) && !initialRepository,
     staleTime: WORKBENCH_STALE_TIME_MS,
     queryFn: async () => {
       if (!projectId) return [];
@@ -1824,18 +1824,13 @@ export function useProjectRepositories(
     },
   });
   useEffect(() => {
+    if (initialRepository) return;
     const invalidate = () => queryClient.invalidateQueries({ queryKey });
     return paseo.workspaces.subscribe(invalidate);
-  }, [paseo, queryClient, queryKey]);
+  }, [initialRepository, paseo, queryClient, queryKey]);
   return useMemo(() => {
+    if (initialRepository) return [initialRepository];
     const loaded = query.data ?? [];
-    if (!initialRepository) return loaded;
-    const initialLower = initialRepository.toLowerCase();
-    return [
-      initialRepository,
-      ...loaded.filter(
-        (repository) => repository.toLowerCase() !== initialLower,
-      ),
-    ];
+    return loaded;
   }, [initialRepository, query.data]);
 }
