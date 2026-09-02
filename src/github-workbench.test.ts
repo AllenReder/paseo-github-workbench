@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   adjustPendingResourceCount,
+  githubResourceVersion,
   isGitHubResourceDetailStale,
   issueBranchSlug,
   mergeDetailedResource,
@@ -232,8 +233,9 @@ describe("GitHub workbench shared primitives", () => {
         }),
       ),
     ).toBe(false);
-    expect(isGitHubResourceDetailStale(summary, detail, 200, 100)).toBe(true);
-    expect(isGitHubResourceDetailStale(summary, detail, 100, 200)).toBe(false);
+    expect(githubResourceVersion(summary)).not.toBe(
+      githubResourceVersion(detail),
+    );
   });
 
   test("formats accessibility labels properly", () => {

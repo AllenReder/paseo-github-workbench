@@ -16,6 +16,7 @@ import {
   adjustPendingResourceCount,
   ensureResourceWorkspaceRpc,
   type GitHubResource,
+  githubResourceVersion,
   isGitHubResourceDetailStale,
   type LifecycleState,
   listResourcesRpc,
@@ -42,6 +43,10 @@ type WorkbenchProps = PluginSurfaceProps & {
 type ContentTab = "all" | "issue" | "pull-request" | "mine" | "review";
 type OwnershipFilter = "all" | "mine" | "assigned" | "review";
 type StatusFilter = LifecycleState;
+type ResourceDetailQueryData = {
+  resource: GitHubResource;
+  summaryVersion: string;
+};
 const WORKBENCH_STALE_TIME_MS = 5 * 60_000;
 const RESOURCE_DETAIL_STALE_TIME_MS = 10 * 60_000;
 
@@ -1157,35 +1162,41 @@ export function Workbench({
     staleTime: RESOURCE_DETAIL_STALE_TIME_MS,
     queryFn: async () => {
       if (!selected) throw new Error("No GitHub resource is selected.");
-      return refreshResource({
+      const summaryVersion = githubResourceVersion(selected);
+      const detail = await refreshResource({
         kind: selected.kind,
         repository: selected.repository,
         number: selected.number,
       });
+      return { ...detail, summaryVersion } satisfies ResourceDetailQueryData;
     },
   });
-  const detailResource = selectedDetailQuery.data?.resource;
+  const detailQueryData = selectedDetailQuery.data;
+  const detailResource = detailQueryData?.resource;
   const selectedResourceKey = selected?.key ?? null;
-  const selectedUpdatedAt = selected?.updatedAt ?? null;
-  const selectedChecksStatus =
-    selected?.kind === "pull-request" ? selected.checksStatus : null;
+  const selectedSummaryVersion = selected
+    ? githubResourceVersion(selected)
+    : null;
+  const detailVersionMismatch = Boolean(
+    detailQueryData &&
+      detailQueryData.summaryVersion !== selectedSummaryVersion,
+  );
   const detailIsBehindSummary = Boolean(
     selected &&
       detailResource &&
-      isGitHubResourceDetailStale(
-        selected,
-        detailResource,
-        query.dataUpdatedAt,
-        selectedDetailQuery.dataUpdatedAt,
-      ),
+      (detailVersionMismatch ||
+        isGitHubResourceDetailStale(selected, detailResource)),
   );
   const selectedForDetail =
-    selected && detailResource && !detailIsBehindSummary
+    selected &&
+    detailResource &&
+    !detailVersionMismatch &&
+    !detailIsBehindSummary
       ? mergeDetailedResource(selected, detailResource)
       : selected;
   const staleDetailVersion =
-    detailIsBehindSummary && selectedResourceKey && selectedUpdatedAt
-      ? `${selectedResourceKey}:${selectedUpdatedAt}:${selectedChecksStatus ?? ""}`
+    detailIsBehindSummary && selectedSummaryVersion
+      ? selectedSummaryVersion
       : null;
   useEffect(() => {
     if (!selectedResourceKey || !staleDetailVersion) return;
@@ -1258,7 +1269,10 @@ export function Workbench({
           );
           queryClient.setQueryData(
             resourceDetailQueryKey(host.id, resource.key),
-            { resource: refreshed },
+            {
+              resource: refreshed,
+              summaryVersion: githubResourceVersion(refreshed),
+            } satisfies ResourceDetailQueryData,
           );
           setRefreshingKey(null);
         })

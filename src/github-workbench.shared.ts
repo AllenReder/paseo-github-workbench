@@ -318,11 +318,15 @@ export function mergeDetailedResource(
   return { ...summary, body: detail.body };
 }
 
+export function githubResourceVersion(resource: GitHubResource): string {
+  return `${resource.key}:${resource.updatedAt}:${
+    resource.kind === "pull-request" ? resource.checksStatus : ""
+  }`;
+}
+
 export function isGitHubResourceDetailStale(
   summary: GitHubResource,
   detail: GitHubResource,
-  summaryObservedAt?: number,
-  detailObservedAt?: number,
 ): boolean {
   if (summary.key !== detail.key || summary.kind !== detail.kind) return true;
   if (detail.updatedAt < summary.updatedAt) return true;
@@ -334,10 +338,7 @@ export function isGitHubResourceDetailStale(
   ) {
     return false;
   }
-  if (summaryObservedAt === undefined || detailObservedAt === undefined) {
-    return true;
-  }
-  return detailObservedAt < summaryObservedAt;
+  return true;
 }
 
 export function issueBranchSlug(number: number, title: string): string {
