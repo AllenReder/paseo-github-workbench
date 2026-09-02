@@ -32,7 +32,6 @@ describe("GitHubResourceIntake", () => {
                     updatedAt: "2026-02-02T00:00:00Z",
                     reviewDecision: "APPROVED",
                     statusCheckRollup: {
-                      state: "SUCCESS",
                       contexts: {
                         nodes: [
                           {
@@ -40,6 +39,7 @@ describe("GitHubResourceIntake", () => {
                             status: "COMPLETED",
                             conclusion: "SUCCESS",
                           },
+                          { name: "mystery", status: "BLOCKED" },
                         ],
                       },
                     },
@@ -96,6 +96,9 @@ describe("GitHubResourceIntake", () => {
     expect(second.resources).toHaveLength(2);
     expect(first.resources[0].key).toBe("pull-request:getpaseo/paseo#42");
     expect(first.resources[1].key).toBe("issue:getpaseo/paseo#99");
+    if (first.resources[0].kind === "pull-request") {
+      expect(first.resources[0].checksStatus).toBe("unknown");
+    }
 
     const third = await intake.listResources({
       scope: "repository",

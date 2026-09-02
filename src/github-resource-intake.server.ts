@@ -218,6 +218,7 @@ function summarizeChecks(checks: unknown): PullRequestResource["checksStatus"] {
   if (!Array.isArray(checks) || checks.length === 0) return "none";
   let sawFailure = false;
   let sawPending = false;
+  let sawUnknown = false;
   let sawSuccess = false;
   for (const check of checks) {
     if (!check || typeof check !== "object") continue;
@@ -271,10 +272,13 @@ function summarizeChecks(checks: unknown): PullRequestResource["checksStatus"] {
       ["SUCCESS", "NEUTRAL", "SKIPPED", "STALE"].includes(status)
     ) {
       sawSuccess = true;
+    } else {
+      sawUnknown = true;
     }
   }
   if (sawFailure) return "failure";
   if (sawPending) return "pending";
+  if (sawUnknown) return "unknown";
   return sawSuccess ? "success" : "unknown";
 }
 
