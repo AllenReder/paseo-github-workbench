@@ -23,22 +23,17 @@ export type TranslationDictionary = {
     empty: string;
     errorPrefix: string;
     unableToLoad: string;
-  };
-  diagnostics: {
-    noViewer: string;
-    recheck: string;
-    statusHealthy: string;
-    statusNotAuthenticated: string;
-    statusRateLimited: string;
-    statusError: string;
-  };
-  navigation: {
-    tabs: {
-      account: string;
-      projects: string;
-    };
-    projectsBanner: string;
-    loadingProjects: string;
+    selectResource: string;
+    backToList: string;
+    filters: string;
+    filterStatus: string;
+    filterWorkflow: string;
+    filterOwnership: string;
+    filterRepository: string;
+    resizeDivider: string;
+    expandList: string;
+    shrinkList: string;
+    updated: string;
   };
   summary: {
     total: string;
@@ -55,6 +50,11 @@ export type TranslationDictionary = {
     directionDesc: string;
   };
   filters: {
+    status: {
+      open: string;
+      merged: string;
+      closed: string;
+    };
     kinds: {
       all: string;
       pullRequest: string;
@@ -90,6 +90,8 @@ export type TranslationDictionary = {
       assigned: string;
       draft: string;
       open: string;
+      merged: string;
+      closed: string;
       noRelationship: string;
       ciPassing: string;
       ciRunning: string;
@@ -108,6 +110,11 @@ export type TranslationDictionary = {
       agentSummary: string;
       moreAgents: string;
       linkedReference: string;
+      noDescription: string;
+      assignees: string;
+      branches: string;
+      review: string;
+      mergeability: string;
     };
     relationships: {
       linkedResource: string;

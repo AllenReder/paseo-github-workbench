@@ -9,7 +9,10 @@ import {
   resourceKey,
   resourceMatchesWorkspace,
 } from "./github-workbench.shared";
-import { resourceAccessibilityLabel } from "./workbench-ui.client";
+import {
+  clampWorkbenchListWidth,
+  resourceAccessibilityLabel,
+} from "./workbench-ui.client";
 
 function pullRequest(
   overrides: Partial<PullRequestResource> = {},
@@ -20,6 +23,7 @@ function pullRequest(
     repository: "getpaseo/paseo",
     number: 42,
     title: "Test pull request",
+    body: "Test body",
     url: "https://github.com/getpaseo/paseo/pull/42",
     authorLogin: "ada",
     assigneeLogins: [],
@@ -34,6 +38,10 @@ function pullRequest(
     isDraft: false,
     headRefName: "feature",
     baseRefName: "main",
+    closedAt: null,
+    mergedAt: null,
+    state: "OPEN",
+    lifecycleState: "open",
     checksStatus: "success",
     checkDetails: [],
     commentCount: 0,
@@ -44,6 +52,13 @@ function pullRequest(
   };
 }
 
+describe("workbench layout", () => {
+  test("clamps the resource list to 30–70% of the available width", () => {
+    expect(clampWorkbenchListWidth(1_000, 0)).toBe(300);
+    expect(clampWorkbenchListWidth(1_000, 500)).toBe(500);
+    expect(clampWorkbenchListWidth(1_000, 1_000)).toBe(700);
+  });
+});
 describe("GitHub workbench shared primitives", () => {
   test("normalizes HTTPS and SSH GitHub remotes", () => {
     expect(

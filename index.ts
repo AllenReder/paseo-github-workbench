@@ -1,14 +1,12 @@
 import type { PluginContext } from "@getpaseo/plugin";
 import { GitHubWorkbenchSurface } from "./src/github-workbench.client";
 import {
-  diagnosticsRpcHandler,
   ensureResourceWorkspace,
   listProjectCatalog,
   listResources,
   refreshResourceRpcHandler,
 } from "./src/github-workbench.server";
 import {
-  diagnosticsRpc,
   ensureResourceWorkspaceRpc,
   listProjectCatalogRpc,
   listResourcesRpc,
@@ -17,7 +15,6 @@ import {
 import { ProjectGitHubWorkbenchPanel } from "./src/project-workbench.client";
 
 export default function contribute(plugin: PluginContext) {
-  plugin.handle(diagnosticsRpc, diagnosticsRpcHandler);
   plugin.handle(refreshResourceRpc, refreshResourceRpcHandler);
   plugin.handle(listProjectCatalogRpc, listProjectCatalog);
   plugin.handle(listResourcesRpc, listResources);

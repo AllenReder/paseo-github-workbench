@@ -4,6 +4,8 @@ import { z } from "zod";
 export const ResourceKindSchema = z.enum(["pull-request", "issue"]);
 export type ResourceKind = z.infer<typeof ResourceKindSchema>;
 
+export const LifecycleStateSchema = z.enum(["open", "merged", "closed"]);
+export type LifecycleState = z.infer<typeof LifecycleStateSchema>;
 export const ChecksStatusSchema = z.enum([
   "success",
   "pending",
@@ -30,12 +32,16 @@ const ResourceBaseSchema = z.object({
   repository: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
   number: z.number().int().positive(),
   title: z.string(),
+  body: z.string().default(""),
   url: z.string().url(),
   authorLogin: z.string().nullable(),
   assigneeLogins: z.array(z.string()),
   labels: z.array(z.string()),
   createdAt: z.string(),
   updatedAt: z.string(),
+  closedAt: z.string().nullable().default(null),
+  state: z.enum(["OPEN", "CLOSED", "MERGED"]).default("OPEN"),
+  lifecycleState: LifecycleStateSchema.default("open"),
   isMine: z.boolean(),
   isAssignedToMe: z.boolean(),
   workspaceIds: z.array(z.string()),
@@ -54,6 +60,7 @@ export const PullRequestResourceSchema = ResourceBaseSchema.extend({
   isDraft: z.boolean(),
   headRefName: z.string().nullable(),
   baseRefName: z.string().nullable(),
+  mergedAt: z.string().nullable().default(null),
   checksStatus: ChecksStatusSchema,
   checkDetails: z.array(PullRequestCheckSchema).default([]),
   commentCount: z.number().int().nonnegative(),
@@ -100,6 +107,7 @@ export const listResourcesRpc = defineRpc({
         .string()
         .regex(/^[^/\s]+\/[^/\s]+$/)
         .optional(),
+      state: LifecycleStateSchema.default("open").optional(),
       forceRefresh: z.boolean().optional(),
     })
     .superRefine((value, context) => {
@@ -126,19 +134,6 @@ export const refreshResourceRpc = defineRpc({
     number: z.number().int().positive(),
   }),
   output: z.object({ resource: GitHubResourceSchema }),
-});
-
-export const diagnosticsRpc = defineRpc({
-  name: "github-workbench.diagnostics",
-  input: z.object({ forceRefresh: z.boolean().optional() }),
-  output: z.object({
-    viewerLogin: z.string().nullable(),
-    remaining: z.number().int().nonnegative().nullable(),
-    limit: z.number().int().nonnegative().nullable(),
-    resetAt: z.string().nullable(),
-    status: z.enum(["ok", "auth-required", "rate-limited", "unavailable"]),
-    message: z.string().nullable(),
-  }),
 });
 
 export const ProjectCatalogItemSchema = z.object({

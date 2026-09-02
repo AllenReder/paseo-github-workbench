@@ -1,14 +1,8 @@
 import type { PluginHostProps, PluginSurfaceProps } from "@getpaseo/plugin";
 import { usePaseo, useRpc } from "@getpaseo/plugin";
 import { useToast } from "@getpaseo/plugin/react-native";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Linking,
   Pressable,
@@ -16,92 +10,68 @@ import {
   Text,
   TextInput,
   View,
-  type ViewStyle,
 } from "react-native";
 import {
   adjustPendingResourceCount,
-  diagnosticsRpc,
   ensureResourceWorkspaceRpc,
   type GitHubResource,
+  type LifecycleState,
   listResourcesRpc,
   mergeRefreshedResource,
   normalizeGitHubRepository,
   openExternalUrl,
-  type ResourceKind,
   refreshResourceRpc,
 } from "./github-workbench.shared";
-import type { Translator } from "./i18n";
 import { useTranslation } from "./i18n/context";
 import {
-  type AgentSnapshot,
   createResourceIndex,
-  type IndexedResource,
-  type MilestoneFilter,
   type PaseoDirectorySnapshot,
-  type QuickResourceFilter,
   type ResourceClassification,
-  type ResourceSortDimension,
-  type ResourceSortDirection,
   type WorkspaceSnapshot,
 } from "./resource-index.shared";
 
 type ResourceScope =
   | { scope: "account" }
   | { scope: "repository"; repository: string };
-
 type WorkbenchProps = PluginSurfaceProps & {
-  scope: ResourceScope | null;
-  showDiagnostics?: boolean;
+  scope: ResourceScope;
 };
-
-const REASON_KEY_MAP: Record<string, string> = {
-  "Agent needs attention": "reasons.agentNeedsAttention",
-  "Agent failed": "reasons.agentFailed",
-  "Agent is working": "reasons.agentIsWorking",
-  "Checks running": "reasons.checksRunning",
-  "Your review requested": "reasons.yourReviewRequested",
-  "Checks failing": "reasons.checksFailing",
-  "Changes needed": "reasons.changesNeeded",
-  "Ready to merge": "reasons.readyToMerge",
-  "Waiting for GitHub activity": "reasons.waitingForActivity",
-  "Waiting for review": "reasons.waitingForReview",
-  "Waiting for mergeability": "reasons.waitingForMergeability",
-  "Assigned to you": "reasons.assignedToYou",
-  "Open issue": "reasons.openIssue",
-};
-
-export function localizeReason(reason: string, t: Translator): string {
-  const key = REASON_KEY_MAP[reason];
-  return key ? t(key, undefined, reason) : reason;
-}
-
-export function localizeChecksStatus(status: string, t: Translator): string {
-  const key = `checksStatus.${status}`;
-  return t(key, undefined, status);
-}
-
-export function localizeReviewDecision(
-  decision: string,
-  t: Translator,
-): string {
-  const camelKey = decision.replace(/_([a-z])/g, (_, letter) =>
-    letter.toUpperCase(),
+type ContentTab = "all" | "issue" | "pull-request" | "mine" | "review";
+type OwnershipFilter = "all" | "mine" | "assigned" | "review";
+type StatusFilter = LifecycleState;
+export function clampWorkbenchListWidth(
+  availableWidth: number,
+  requestedWidth: number,
+) {
+  if (availableWidth <= 0) return 0;
+  return Math.min(
+    availableWidth * 0.7,
+    Math.max(availableWidth * 0.3, requestedWidth),
   );
-  const key = `reviewDecision.${camelKey}`;
-  return t(key, undefined, decision.replace(/_/g, " "));
+}
+
+export function resourceAccessibilityLabel(
+  kind: string,
+  repository: string,
+  number: number,
+  title: string,
+) {
+  return `${kind} ${repository} #${number}: ${title}`;
 }
 
 function usePaseoDirectory(hostId: string) {
   const paseo = usePaseo();
   const queryClient = useQueryClient();
-  const directoryQueryKey = useMemo(
+  const queryKey = useMemo(
     () => ["github-workbench", hostId, "directory"],
     [hostId],
   );
   const query = useQuery({
-    queryKey: directoryQueryKey,
+    queryKey,
+    staleTime: 0,
     queryFn: async () => {
-      const workspaces = [] as WorkspaceSnapshot[];
+      const workspaces: WorkspaceSnapshot[] = [];
+      const agents: PaseoDirectorySnapshot["agents"] = [];
       let workspaceCursor: string | undefined;
       for (let page = 0; page < 10; page += 1) {
         const response = await paseo.workspaces.list({
@@ -126,7 +96,6 @@ function usePaseoDirectory(hostId: string) {
         workspaceCursor = response.pageInfo.nextCursor ?? undefined;
         if (!workspaceCursor) break;
       }
-      const agents = [] as AgentSnapshot[];
       let agentCursor: string | undefined;
       for (let page = 0; page < 10; page += 1) {
         const response = await paseo.agents.list({
@@ -150,18 +119,15 @@ function usePaseoDirectory(hostId: string) {
       }
       return { workspaces, agents } satisfies PaseoDirectorySnapshot;
     },
-    staleTime: 0,
   });
-
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const invalidate = () => {
       if (timer) clearTimeout(timer);
-      timer = setTimeout(() => {
-        queryClient.invalidateQueries({
-          queryKey: directoryQueryKey,
-        });
-      }, 500);
+      timer = setTimeout(
+        () => queryClient.invalidateQueries({ queryKey }),
+        500,
+      );
     };
     const stopWorkspaces = paseo.workspaces.subscribe(invalidate);
     const stopAgents = paseo.agents.subscribe(invalidate);
@@ -170,226 +136,557 @@ function usePaseoDirectory(hostId: string) {
       stopWorkspaces();
       stopAgents();
     };
-  }, [directoryQueryKey, paseo, queryClient]);
-
+  }, [paseo, queryClient, queryKey]);
   return query;
 }
-function diagnosticsStatusText(
-  status: "ok" | "auth-required" | "rate-limited" | "unavailable" | undefined,
-  t: Translator,
-) {
-  if (status === "ok") return t("diagnostics.statusHealthy");
-  if (status === "auth-required")
-    return t("diagnostics.statusNotAuthenticated");
-  if (status === "rate-limited") return t("diagnostics.statusRateLimited");
-  return t("diagnostics.statusError");
-}
 
-export function GitHubDiagnosticsStatus({
-  hostId,
+function StatusBadge({
+  resource,
   theme,
-  compact,
 }: {
-  hostId: string;
+  resource: GitHubResource;
   theme: PluginHostProps["theme"];
-  compact: boolean;
 }) {
   const { t } = useTranslation();
-  const diagnostics = useRpc(diagnosticsRpc);
-  const queryClient = useQueryClient();
-  const diagnosticsQuery = useQuery({
-    queryKey: ["github-workbench", hostId, "diagnostics"],
-    queryFn: () => diagnostics({}),
-    staleTime: 30_000,
-  });
-  const [rechecking, setRechecking] = useState(false);
-  const recheck = useCallback(async () => {
-    setRechecking(true);
-    try {
-      const value = await diagnostics({ forceRefresh: true });
-      queryClient.setQueryData(
-        ["github-workbench", hostId, "diagnostics"],
-        value,
-      );
-    } finally {
-      setRechecking(false);
-    }
-  }, [diagnostics, hostId, queryClient]);
-  const data = diagnosticsQuery.data;
-  const statusText = diagnosticsStatusText(data?.status, t);
-  const statusColor =
-    data?.status === "ok"
-      ? theme.colors.statusSuccess
-      : data?.status === "rate-limited"
-        ? theme.colors.statusWarning
-        : theme.colors.statusDanger;
-
-  return (
-    <View
-      style={{
-        alignItems: "center",
-        flexDirection: "row",
-        flexShrink: 1,
-        gap: compact ? 6 : 8,
-      }}
-    >
+  if (resource.lifecycleState === "merged") {
+    return (
       <View
-        accessible
-        accessibilityLabel={statusText}
         style={{
-          backgroundColor: statusColor,
-          borderRadius: 999,
-          height: 8,
-          width: 8,
-        }}
-      />
-      <Text
-        numberOfLines={1}
-        style={{
-          color: theme.colors.foreground,
-          fontSize: 12,
-          fontWeight: "700",
-        }}
-      >
-        {data?.viewerLogin ? `@${data.viewerLogin}` : t("diagnostics.noViewer")}
-      </Text>
-      <Text
-        numberOfLines={1}
-        style={{ color: statusColor, flexShrink: 1, fontSize: 12 }}
-      >
-        {statusText}
-      </Text>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={t("diagnostics.recheck")}
-        accessibilityState={{ disabled: rechecking }}
-        disabled={rechecking}
-        onPress={recheck}
-        style={{
-          borderColor: theme.colors.border,
-          borderRadius: 8,
+          borderColor: "#a371f7",
+          borderRadius: 99,
           borderWidth: 1,
-          opacity: rechecking ? 0.6 : 1,
-          paddingHorizontal: 8,
-          paddingVertical: compact ? 5 : 6,
+          paddingHorizontal: 7,
+          paddingVertical: 2,
+        }}
+      >
+        <Text style={{ color: "#a371f7", fontSize: 10, fontWeight: "700" }}>
+          {t("resource.badges.merged")}
+        </Text>
+      </View>
+    );
+  }
+  if (resource.lifecycleState === "closed") {
+    return (
+      <View
+        style={{
+          borderColor: theme.colors.statusDanger,
+          borderRadius: 99,
+          borderWidth: 1,
+          paddingHorizontal: 7,
+          paddingVertical: 2,
         }}
       >
         <Text
           style={{
-            color: theme.colors.accent,
-            fontSize: 12,
+            color: theme.colors.statusDanger,
+            fontSize: 10,
             fontWeight: "700",
           }}
         >
-          {t("diagnostics.recheck")}
+          {t("resource.badges.closed")}
         </Text>
-      </Pressable>
+      </View>
+    );
+  }
+  const draft = resource.kind === "pull-request" && resource.isDraft;
+  const color = draft
+    ? theme.colors.foregroundMuted
+    : theme.colors.statusSuccess;
+  return (
+    <View
+      style={{
+        borderColor: color,
+        borderRadius: 99,
+        borderWidth: 1,
+        paddingHorizontal: 7,
+        paddingVertical: 2,
+      }}
+    >
+      <Text style={{ color, fontSize: 10, fontWeight: "700" }}>
+        {draft ? t("resource.badges.draft") : t("resource.badges.open")}
+      </Text>
     </View>
   );
 }
-function FilterChip({
-  label,
+
+function ListRow({
+  resource,
   selected,
   onPress,
-  styles,
   theme,
 }: {
-  label: string;
+  resource: GitHubResource;
   selected: boolean;
   onPress: () => void;
-  styles: { chip: ViewStyle; activeChip: ViewStyle };
   theme: PluginHostProps["theme"];
 }) {
+  const { t } = useTranslation();
+  const kind =
+    resource.kind === "pull-request"
+      ? t("resource.kind.pullRequest")
+      : t("resource.kind.issue");
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={label}
+      accessibilityLabel={resourceAccessibilityLabel(
+        kind,
+        resource.repository,
+        resource.number,
+        resource.title,
+      )}
       accessibilityState={{ selected }}
       onPress={onPress}
-      style={[styles.chip, selected && styles.activeChip]}
+      style={{
+        backgroundColor: selected ? theme.colors.surface2 : "transparent",
+        borderColor: selected ? theme.colors.border : "transparent",
+        borderLeftColor: selected ? theme.colors.accent : "transparent",
+        borderLeftWidth: 2,
+        borderRadius: 7,
+        borderWidth: selected ? 1 : 0,
+        gap: 6,
+        paddingHorizontal: 12,
+        paddingVertical: 11,
+      }}
     >
+      <View style={{ alignItems: "center", flexDirection: "row", gap: 6 }}>
+        <Text
+          style={{
+            color: theme.colors.foregroundMuted,
+            fontSize: 11,
+            fontWeight: "700",
+          }}
+        >
+          {kind} #{resource.number}
+        </Text>
+        <StatusBadge resource={resource} theme={theme} />
+        {resource.kind === "pull-request" && resource.reviewRequestedFromMe ? (
+          <Text
+            style={{
+              color: theme.colors.statusWarning,
+              fontSize: 11,
+              fontWeight: "700",
+            }}
+          >
+            {t("resource.badges.review")}
+          </Text>
+        ) : null}
+      </View>
       <Text
+        numberOfLines={2}
         style={{
-          color: selected
-            ? theme.colors.surface0
-            : theme.colors.foregroundMuted,
-          fontSize: 12,
+          color: theme.colors.foreground,
+          fontSize: 14,
           fontWeight: "600",
+          lineHeight: 19,
         }}
       >
-        {label}
+        {resource.title}
+      </Text>
+      <Text
+        numberOfLines={1}
+        style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}
+      >
+        {resource.repository} ·{" "}
+        {t("resource.meta.commentsCount", { count: resource.commentCount })}
+      </Text>
+      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+        {t("workbench.updated", {
+          date: new Date(resource.updatedAt).toLocaleDateString(),
+        })}
       </Text>
     </Pressable>
   );
 }
 
-function ToolbarGroup({ children }: { children: ReactNode }) {
+function Body({
+  body,
+  theme,
+}: {
+  body: string;
+  theme: PluginHostProps["theme"];
+}) {
+  const { t } = useTranslation();
+  if (!body.trim())
+    return (
+      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 14 }}>
+        {t("resource.meta.noDescription")}
+      </Text>
+    );
+  const occurrences = new Map<string, number>();
   return (
-    <View
-      style={{
-        alignItems: "center",
-        flexDirection: "row",
-        flexWrap: "wrap",
-        gap: 6,
-      }}
-    >
-      {children}
+    <View style={{ gap: 7 }}>
+      {body
+        .replace(/\r\n/g, "\n")
+        .split("\n")
+        .map((line) => {
+          const occurrence = (occurrences.get(line) ?? 0) + 1;
+          occurrences.set(line, occurrence);
+          const key = `${line}-${occurrence}`;
+          const heading = /^(#{1,6})\s+(.+)$/.exec(line);
+          const bullet = /^\s*[-*+]\s+(.+)$/.exec(line);
+          const quote = /^>\s?(.*)$/.exec(line);
+          if (heading)
+            return (
+              <Text
+                key={key}
+                style={{
+                  color: theme.colors.foreground,
+                  fontSize: heading[1].length < 3 ? 17 : 15,
+                  fontWeight: "700",
+                  marginTop: occurrence > 1 ? 7 : 0,
+                }}
+              >
+                {heading[2]}
+              </Text>
+            );
+          if (bullet)
+            return (
+              <Text
+                key={key}
+                style={{
+                  color: theme.colors.foreground,
+                  fontSize: 14,
+                  lineHeight: 21,
+                }}
+              >
+                • {bullet[1]}
+              </Text>
+            );
+          if (quote)
+            return (
+              <Text
+                key={key}
+                style={{
+                  borderLeftColor: theme.colors.border,
+                  borderLeftWidth: 2,
+                  color: theme.colors.foregroundMuted,
+                  fontSize: 14,
+                  lineHeight: 21,
+                  paddingLeft: 9,
+                }}
+              >
+                {quote[1]}
+              </Text>
+            );
+          if (!line.trim()) return <View key={key} style={{ height: 5 }} />;
+          return (
+            <Text
+              key={key}
+              style={{
+                color: theme.colors.foreground,
+                fontSize: 14,
+                lineHeight: 21,
+              }}
+            >
+              {line}
+            </Text>
+          );
+        })}
     </View>
   );
 }
 
-export function resourceAccessibilityLabel(
-  kind: string,
-  repository: string,
-  number: number,
-  title: string,
-): string {
-  return `${kind} ${repository} #${number}: ${title}`;
-}
-
-function PullRequestChecks({
+function DetailPane({
   resource,
   theme,
+  navigation,
+  ensuring,
+  onEnsure,
+  onRefresh,
+  refreshing,
+  onBack,
 }: {
-  resource: Extract<GitHubResource, { kind: "pull-request" }>;
+  resource: GitHubResource | null;
   theme: PluginHostProps["theme"];
+  navigation: WorkbenchProps["navigation"];
+  ensuring: boolean;
+  onEnsure: (resource: GitHubResource) => void;
+  onRefresh: (resource: GitHubResource) => void;
+  refreshing: boolean;
+  onBack?: () => void;
 }) {
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(false);
-  const checks = [...resource.checkDetails].sort((left, right) => {
-    const rank = (status: string) =>
-      status === "failure" ? 0 : status === "pending" ? 1 : 2;
+  const toast = useToast();
+  const external = useCallback(async () => {
+    if (
+      resource &&
+      !(await openExternalUrl(resource.url, { linking: Linking }))
+    )
+      toast.error(
+        t("resource.errors.unableToOpenExternal", {
+          repository: resource.repository,
+          number: resource.number,
+        }),
+      );
+  }, [resource, t, toast]);
+  if (!resource)
     return (
-      rank(left.status) - rank(right.status) ||
-      left.name.localeCompare(right.name)
-    );
-  });
-  const checkCount = checks.length;
-  return (
-    <View style={{ gap: 6 }}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={t(
-          expanded
-            ? "resource.actions.collapseChecks"
-            : "resource.actions.expandChecks",
-        )}
-        accessibilityState={{ expanded }}
-        onPress={() => setExpanded((value) => !value)}
+      <View
+        style={{
+          alignItems: "center",
+          flex: 1,
+          justifyContent: "center",
+          padding: 32,
+        }}
       >
-        <Text style={{ color: theme.colors.accent, fontWeight: "600" }}>
-          {expanded
-            ? t("checksDetails.hideDetails")
-            : t("checksDetails.showDetails", { count: checkCount })}
+        <Text
+          style={{
+            color: theme.colors.foregroundMuted,
+            fontSize: 15,
+            textAlign: "center",
+          }}
+        >
+          {t("workbench.selectResource")}
         </Text>
-      </Pressable>
-      {expanded ? (
-        checks.length === 0 ? (
-          <Text style={{ color: theme.colors.foregroundMuted }}>
-            {t("checksDetails.noDetails")}
+      </View>
+    );
+  const kind =
+    resource.kind === "pull-request"
+      ? t("resource.kind.pullRequest")
+      : t("resource.kind.issue");
+  const metadata = [
+    `${kind} #${resource.number}`,
+    resource.authorLogin ? `@${resource.authorLogin}` : null,
+    t("resource.meta.commentsCount", { count: resource.commentCount }),
+    resource.kind === "issue" ? resource.milestoneTitle : resource.headRefName,
+  ].filter(Boolean);
+  return (
+    <ScrollView
+      contentContainerStyle={{ gap: 18, padding: 20, paddingBottom: 40 }}
+      style={{ flex: 1 }}
+    >
+      {onBack ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={t("workbench.backToList")}
+          onPress={onBack}
+        >
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13 }}>
+            ← {t("workbench.backToList")}
           </Text>
-        ) : (
-          checks.map((check) => (
+        </Pressable>
+      ) : null}
+      <View
+        style={{
+          alignItems: "flex-start",
+          flexDirection: "row",
+          gap: 8,
+          justifyContent: "space-between",
+        }}
+      >
+        <View style={{ flex: 1, gap: 9 }}>
+          <View
+            style={{
+              alignItems: "center",
+              flexDirection: "row",
+              flexWrap: "wrap",
+              gap: 7,
+            }}
+          >
+            <Text
+              style={{
+                color: theme.colors.foregroundMuted,
+                fontSize: 12,
+                fontWeight: "700",
+              }}
+            >
+              {resource.repository}
+            </Text>
+            <StatusBadge resource={resource} theme={theme} />
+          </View>
+          <Text
+            style={{
+              color: theme.colors.foreground,
+              fontSize: 23,
+              fontWeight: "700",
+              lineHeight: 30,
+            }}
+          >
+            {resource.title}
+          </Text>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13 }}>
+            {metadata.join(" · ")}
+          </Text>
+        </View>
+        <View style={{ flexDirection: "column", flexShrink: 0, gap: 6 }}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={
+              refreshing
+                ? t("resource.actions.refreshingItem")
+                : t("resource.actions.refreshItem")
+            }
+            disabled={refreshing}
+            onPress={() => onRefresh(resource)}
+            style={{
+              borderColor: theme.colors.border,
+              borderRadius: 6,
+              borderWidth: 1,
+              opacity: refreshing ? 0.55 : 1,
+              paddingHorizontal: 9,
+              paddingVertical: 6,
+            }}
+          >
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+              ↻
+            </Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t("resource.actions.openOnGitHub")}
+            onPress={external}
+            style={{
+              borderColor: theme.colors.border,
+              borderRadius: 6,
+              borderWidth: 1,
+              paddingHorizontal: 9,
+              paddingVertical: 6,
+            }}
+          >
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+              ↗
+            </Text>
+          </Pressable>
+        </View>
+      </View>
+      <View
+        style={{
+          alignItems: "center",
+          flexDirection: "row",
+          flexWrap: "wrap",
+          gap: 6,
+        }}
+      >
+        {resource.labels.map((label) => (
+          <View
+            key={label}
+            style={{
+              backgroundColor: theme.colors.surface2,
+              borderRadius: 99,
+              paddingHorizontal: 8,
+              paddingVertical: 3,
+            }}
+          >
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+              {label}
+            </Text>
+          </View>
+        ))}
+        {resource.isMine ? (
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+            {t("resource.badges.yours")}
+          </Text>
+        ) : null}
+        {resource.isAssignedToMe ? (
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+            {t("resource.badges.assigned")}
+          </Text>
+        ) : null}
+        {resource.kind === "pull-request" && resource.reviewRequestedFromMe ? (
+          <Text style={{ color: theme.colors.statusWarning, fontSize: 12 }}>
+            {t("resource.badges.review")}
+          </Text>
+        ) : null}
+      </View>
+      {navigation?.openWorkspace ? (
+        <View style={{ flexDirection: "row", gap: 8 }}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={
+              ensuring
+                ? t("resource.actions.creatingWorkspace")
+                : resource.workspaceIds[0]
+                  ? t("resource.actions.openWorkspace")
+                  : t("resource.actions.createWorkspace")
+            }
+            disabled={ensuring}
+            onPress={() => onEnsure(resource)}
+            style={{
+              backgroundColor: theme.colors.accent,
+              borderRadius: 7,
+              opacity: ensuring ? 0.55 : 1,
+              paddingHorizontal: 12,
+              paddingVertical: 8,
+            }}
+          >
+            <Text
+              style={{
+                color: theme.colors.accentForeground,
+                fontSize: 13,
+                fontWeight: "700",
+              }}
+            >
+              {ensuring
+                ? t("resource.actions.creatingWorkspace")
+                : resource.workspaceIds[0]
+                  ? t("resource.actions.openWorkspace")
+                  : t("resource.actions.createWorkspace")}
+            </Text>
+          </Pressable>
+        </View>
+      ) : null}
+      <View style={{ backgroundColor: theme.colors.border, height: 1 }} />
+      <Body body={resource.body} theme={theme} />
+      {resource.kind === "pull-request" ? (
+        <View style={{ gap: 7 }}>
+          <Text
+            style={{
+              color: theme.colors.foregroundMuted,
+              fontSize: 12,
+              fontWeight: "700",
+            }}
+          >
+            {t("resource.meta.branches", {
+              head: resource.headRefName ?? "—",
+              base: resource.baseRefName ?? "—",
+            })}
+          </Text>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+            {t("resource.meta.review", {
+              decision:
+                resource.reviewDecision === "approved"
+                  ? t("reviewDecision.approved")
+                  : resource.reviewDecision === "changes_requested"
+                    ? t("reviewDecision.changesRequested")
+                    : resource.reviewDecision === "pending"
+                      ? t("reviewDecision.reviewRequired")
+                      : t("reviewDecision.none"),
+            })}
+          </Text>
+          <Text
+            style={{
+              color:
+                resource.mergeable === "CONFLICTING"
+                  ? theme.colors.statusDanger
+                  : theme.colors.foregroundMuted,
+              fontSize: 12,
+            }}
+          >
+            {t("resource.meta.mergeability", { status: resource.mergeable })}
+          </Text>
+          <Text
+            style={{
+              color: theme.colors.foregroundMuted,
+              fontSize: 12,
+              fontWeight: "700",
+            }}
+          >
+            {t("checksDetails.title")}
+          </Text>
+          <Text
+            style={{
+              color:
+                resource.checksStatus === "failure"
+                  ? theme.colors.statusDanger
+                  : resource.checksStatus === "pending"
+                    ? theme.colors.statusWarning
+                    : theme.colors.foregroundMuted,
+              fontSize: 13,
+            }}
+          >
+            {t(`checksStatus.${resource.checksStatus}`)}
+          </Text>
+          {resource.checkDetails.map((check) => (
             <View key={check.name} style={{ flexDirection: "row", gap: 8 }}>
               <Text
                 style={{
@@ -401,616 +698,316 @@ function PullRequestChecks({
                         : check.status === "success"
                           ? theme.colors.statusSuccess
                           : theme.colors.foregroundMuted,
-                  fontWeight: "600",
+                  fontSize: 12,
+                  fontWeight: "700",
                 }}
               >
-                {check.status === "failure"
-                  ? t("checksDetails.failed")
-                  : check.status === "pending"
-                    ? t("checksDetails.pending")
-                    : check.status === "unknown"
-                      ? t("checksStatus.unknown")
-                      : t("checksDetails.passed")}
+                {t(`checksStatus.${check.status}`)}
               </Text>
-              <Text style={{ color: theme.colors.foreground, flex: 1 }}>
+              <Text
+                style={{
+                  color: theme.colors.foreground,
+                  flex: 1,
+                  fontSize: 12,
+                }}
+              >
                 {check.name}
               </Text>
             </View>
-          ))
-        )
+          ))}
+        </View>
+      ) : (
+        <View style={{ gap: 5 }}>
+          {resource.milestoneTitle ? (
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+              {resource.milestoneTitle}
+            </Text>
+          ) : null}
+          {resource.assigneeLogins.length ? (
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+              {t("resource.meta.assignees", {
+                assignees: resource.assigneeLogins
+                  .map((login) => `@${login}`)
+                  .join(", "),
+              })}
+            </Text>
+          ) : null}
+        </View>
+      )}
+      {resource.agents[0] && navigation ? (
+        <View
+          style={{
+            alignItems: "center",
+            borderTopColor: theme.colors.border,
+            borderTopWidth: 1,
+            flexDirection: "row",
+            flexWrap: "wrap",
+            gap: 8,
+            paddingTop: 16,
+          }}
+        >
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t("resource.actions.openAgent")}
+            onPress={() =>
+              navigation.openAgent({ agentId: resource.agents[0].id })
+            }
+            style={{ paddingHorizontal: 5, paddingVertical: 8 }}
+          >
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13 }}>
+              {t("resource.actions.openAgent")}
+            </Text>
+          </Pressable>
+        </View>
       ) : null}
+    </ScrollView>
+  );
+}
+function FilterIcon({ color }: { color: string }) {
+  return (
+    <View
+      style={{
+        alignItems: "center",
+        height: 16,
+        justifyContent: "center",
+        width: 16,
+      }}
+    >
+      <View
+        style={{
+          backgroundColor: color,
+          borderRadius: 1,
+          height: 2,
+          width: 16,
+        }}
+      />
+      <View
+        style={{
+          backgroundColor: color,
+          borderRadius: 1,
+          height: 2,
+          marginTop: 2,
+          width: 10,
+        }}
+      />
+      <View
+        style={{
+          backgroundColor: color,
+          borderRadius: 1,
+          height: 6,
+          marginTop: 2,
+          width: 3,
+        }}
+      />
     </View>
   );
 }
 
-function ResourceRow({
-  item,
+function FilterPopover({
   theme,
-  navigation,
-  compact,
-  onSelectLabel,
-  onSelectMilestone,
-  onFocusReference,
-  onRefresh,
-  refreshing,
-  onEnsureWorkspace,
-  ensuringWorkspace,
+  status,
+  bucket,
+  ownership,
+  repository,
+  repositories,
+  showRepositoryFilter,
+  setStatus,
+  setBucket,
+  setOwnership,
+  setRepository,
 }: {
-  item: IndexedResource;
   theme: PluginHostProps["theme"];
-  navigation: WorkbenchProps["navigation"];
-  compact: boolean;
-  onSelectLabel: (label: string) => void;
-  onSelectMilestone: (milestone: MilestoneFilter) => void;
-  onFocusReference: (resource: GitHubResource) => void;
-  onRefresh: (resource: GitHubResource) => void;
-  refreshing: boolean;
-  onEnsureWorkspace: (resource: GitHubResource) => void;
-  ensuringWorkspace: boolean;
+  status: StatusFilter;
+  bucket: ResourceClassification["bucket"] | "all";
+  ownership: OwnershipFilter;
+  repository: string | null;
+  repositories: readonly string[];
+  showRepositoryFilter: boolean;
+  setStatus: (value: StatusFilter) => void;
+  setBucket: (value: ResourceClassification["bucket"] | "all") => void;
+  setOwnership: (value: OwnershipFilter) => void;
+  setRepository: (value: string | null) => void;
 }) {
-  const { resource, referencedTargets } = item;
   const { t } = useTranslation();
-  const toast = useToast();
-  const primaryAgent = resource.agents[0];
-  const openExternal = useCallback(async () => {
-    if (!(await openExternalUrl(resource.url, { linking: Linking })))
-      toast.error(
-        t("resource.errors.unableToOpenExternal", {
-          repository: resource.repository,
-          number: resource.number,
-        }),
-      );
-  }, [resource, t, toast]);
-
-  const kindLabel =
-    resource.kind === "pull-request"
-      ? t("resource.kind.pullRequest")
-      : t("resource.kind.issue");
-  const relationshipBadges = [
-    resource.isMine ? t("resource.badges.yours") : null,
-    resource.kind === "pull-request" && resource.reviewRequestedFromMe
-      ? t("resource.badges.review")
-      : null,
-    resource.isAssignedToMe ? t("resource.badges.assigned") : null,
-  ].filter(Boolean);
-  const resourcePill = {
-    backgroundColor: theme.colors.surface0,
+  const button = (selected: boolean) => ({
+    backgroundColor: selected ? theme.colors.surface2 : theme.colors.surface0,
     borderColor: theme.colors.border,
-    borderRadius: 999,
+    borderRadius: 99,
     borderWidth: 1,
     paddingHorizontal: 8,
     paddingVertical: 4,
-  } as const;
+  });
+  const statusOptions: Array<{ key: StatusFilter; label: string }> = [
+    { key: "open", label: t("filters.status.open") },
+    { key: "merged", label: t("filters.status.merged") },
+    { key: "closed", label: t("filters.status.closed") },
+  ];
+  const bucketOptions = [
+    "all",
+    "needs-attention",
+    "being-handled",
+    "waiting",
+    "ready",
+    "open",
+  ] as const;
   return (
     <View
       style={{
         backgroundColor: theme.colors.surface1,
         borderColor: theme.colors.border,
+        borderRadius: 7,
         borderWidth: 1,
-        borderRadius: compact ? 10 : 12,
-        gap: compact ? 8 : 10,
-        padding: compact ? 10 : 14,
+        elevation: 8,
+        gap: 9,
+        padding: 10,
+        shadowColor: "#000",
+        shadowOffset: { height: 4, width: 0 },
+        shadowOpacity: 0.28,
+        shadowRadius: 10,
       }}
     >
-      <View
+      <Text
         style={{
-          alignItems: "center",
-          flexDirection: "row",
-          gap: 8,
-          flexWrap: "wrap",
+          color: theme.colors.foregroundMuted,
+          fontSize: 11,
+          fontWeight: "700",
         }}
       >
-        <View
-          style={{
-            backgroundColor: theme.colors.surface0,
-            borderColor: theme.colors.border,
-            borderRadius: 6,
-            borderWidth: 1,
-            paddingHorizontal: 7,
-            paddingVertical: 3,
-          }}
-        >
+        {t("workbench.filterStatus")}
+      </Text>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+        {statusOptions.map((opt) => (
+          <Pressable
+            key={opt.key}
+            accessibilityRole="button"
+            accessibilityLabel={opt.label}
+            accessibilityState={{ selected: status === opt.key }}
+            onPress={() => setStatus(opt.key)}
+            style={button(status === opt.key)}
+          >
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+              {opt.label}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+      {showRepositoryFilter && repositories.length > 1 ? (
+        <>
           <Text
             style={{
               color: theme.colors.foregroundMuted,
-              fontSize: 12,
+              fontSize: 11,
               fontWeight: "700",
             }}
           >
-            {kindLabel} #{resource.number}
+            {t("workbench.filterRepository")}
           </Text>
-        </View>
-        <View
-          style={{
-            flexDirection: "row",
-            flexWrap: "wrap",
-            gap: 6,
-            alignItems: "center",
-          }}
-        >
-          {/* Dimension 1: Core Lifecycle */}
-          {resource.kind === "pull-request" && resource.isDraft ? (
-            <View
-              style={{
-                backgroundColor: theme.colors.surface0,
-                borderColor: theme.colors.border,
-                borderRadius: 999,
-                borderWidth: 1,
-                paddingHorizontal: 8,
-                paddingVertical: 2,
-              }}
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t("filters.kinds.all")}
+              accessibilityState={{ selected: repository === null }}
+              onPress={() => setRepository(null)}
+              style={button(repository === null)}
             >
               <Text
-                style={{
-                  color: theme.colors.foregroundMuted,
-                  fontSize: 11,
-                  fontWeight: "700",
-                }}
+                style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}
               >
-                {t("resource.badges.draft")}
+                {t("filters.kinds.all")}
               </Text>
-            </View>
-          ) : (
-            <View
-              style={{
-                backgroundColor: theme.colors.surface0,
-                borderColor: theme.colors.statusSuccess,
-                borderRadius: 999,
-                borderWidth: 1,
-                paddingHorizontal: 8,
-                paddingVertical: 2,
-              }}
-            >
-              <Text
-                style={{
-                  color: theme.colors.statusSuccess,
-                  fontSize: 11,
-                  fontWeight: "700",
-                }}
-              >
-                {t("resource.badges.open")}
-              </Text>
-            </View>
-          )}
-
-          {/* Dimension 2: CI Checks (PRs only) */}
-          {resource.kind === "pull-request" &&
-          resource.checksStatus !== "none" ? (
-            <View
-              style={{
-                backgroundColor: theme.colors.surface0,
-                borderColor:
-                  resource.checksStatus === "failure"
-                    ? theme.colors.statusDanger
-                    : resource.checksStatus === "pending"
-                      ? theme.colors.statusWarning
-                      : resource.checksStatus === "success"
-                        ? theme.colors.statusSuccess
-                        : theme.colors.border,
-                borderRadius: 999,
-                borderWidth: 1,
-                paddingHorizontal: 8,
-                paddingVertical: 2,
-              }}
-            >
-              <Text
-                style={{
-                  color:
-                    resource.checksStatus === "failure"
-                      ? theme.colors.statusDanger
-                      : resource.checksStatus === "pending"
-                        ? theme.colors.statusWarning
-                        : resource.checksStatus === "success"
-                          ? theme.colors.statusSuccess
-                          : theme.colors.foregroundMuted,
-                  fontSize: 11,
-                  fontWeight: "700",
-                }}
-              >
-                {resource.checksStatus === "success"
-                  ? t("resource.badges.ciPassing")
-                  : resource.checksStatus === "pending"
-                    ? t("resource.badges.ciRunning")
-                    : resource.checksStatus === "failure"
-                      ? t("resource.badges.ciFailing")
-                      : t("checksStatus.unknown")}
-              </Text>
-            </View>
-          ) : null}
-
-          {/* Dimension 3: Review Decision (PRs only) */}
-          {resource.kind === "pull-request" ? (
-            resource.reviewDecision === "approved" ? (
-              <View
-                style={{
-                  backgroundColor: theme.colors.surface0,
-                  borderColor: theme.colors.statusSuccess,
-                  borderRadius: 999,
-                  borderWidth: 1,
-                  paddingHorizontal: 8,
-                  paddingVertical: 2,
-                }}
+            </Pressable>
+            {repositories.map((value) => (
+              <Pressable
+                key={value}
+                accessibilityRole="button"
+                accessibilityLabel={value}
+                accessibilityState={{ selected: repository === value }}
+                onPress={() => setRepository(value)}
+                style={button(repository === value)}
               >
                 <Text
-                  style={{
-                    color: theme.colors.statusSuccess,
-                    fontSize: 11,
-                    fontWeight: "700",
-                  }}
+                  style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}
                 >
-                  {t("resource.badges.approved")}
+                  {value}
                 </Text>
-              </View>
-            ) : resource.reviewDecision === "changes_requested" ? (
-              <View
-                style={{
-                  backgroundColor: theme.colors.surface0,
-                  borderColor: theme.colors.statusDanger,
-                  borderRadius: 999,
-                  borderWidth: 1,
-                  paddingHorizontal: 8,
-                  paddingVertical: 2,
-                }}
-              >
-                <Text
-                  style={{
-                    color: theme.colors.statusDanger,
-                    fontSize: 11,
-                    fontWeight: "700",
-                  }}
-                >
-                  {t("resource.badges.changesRequested")}
-                </Text>
-              </View>
-            ) : resource.reviewDecision === "pending" ? (
-              <View
-                style={{
-                  backgroundColor: theme.colors.surface0,
-                  borderColor: theme.colors.statusWarning,
-                  borderRadius: 999,
-                  borderWidth: 1,
-                  paddingHorizontal: 8,
-                  paddingVertical: 2,
-                }}
-              >
-                <Text
-                  style={{
-                    color: theme.colors.statusWarning,
-                    fontSize: 11,
-                    fontWeight: "700",
-                  }}
-                >
-                  {t("resource.badges.reviewRequired")}
-                </Text>
-              </View>
-            ) : (
-              <View
-                style={{
-                  backgroundColor: theme.colors.surface0,
-                  borderColor: theme.colors.border,
-                  borderRadius: 999,
-                  borderWidth: 1,
-                  paddingHorizontal: 8,
-                  paddingVertical: 2,
-                }}
-              >
-                <Text
-                  style={{
-                    color: theme.colors.foregroundMuted,
-                    fontSize: 11,
-                    fontWeight: "700",
-                  }}
-                >
-                  {t("resource.badges.unreviewed")}
-                </Text>
-              </View>
-            )
-          ) : null}
-
-          {/* Dimension 4: Agent Status */}
-          {primaryAgent ? (
-            <View
-              style={{
-                backgroundColor: theme.colors.surface0,
-                borderColor:
-                  primaryAgent.status === "error" ||
-                  primaryAgent.pendingPermissions > 0 ||
-                  (primaryAgent.requiresAttention &&
-                    primaryAgent.attentionReason !== "finished")
-                    ? theme.colors.statusDanger
-                    : theme.colors.statusWarning,
-                borderRadius: 999,
-                borderWidth: 1,
-                paddingHorizontal: 8,
-                paddingVertical: 2,
-              }}
-            >
-              <Text
-                style={{
-                  color:
-                    primaryAgent.status === "error" ||
-                    primaryAgent.pendingPermissions > 0 ||
-                    (primaryAgent.requiresAttention &&
-                      primaryAgent.attentionReason !== "finished")
-                      ? theme.colors.statusDanger
-                      : theme.colors.statusWarning,
-                  fontSize: 11,
-                  fontWeight: "700",
-                }}
-              >
-                {primaryAgent.status === "error" ||
-                primaryAgent.pendingPermissions > 0 ||
-                (primaryAgent.requiresAttention &&
-                  primaryAgent.attentionReason !== "finished")
-                  ? t("resource.badges.agentAttention")
-                  : t("resource.badges.agentWorking")}
-              </Text>
-            </View>
-          ) : null}
-
-          {/* Dimension 5: Merge Conflicts */}
-          {resource.kind === "pull-request" &&
-          resource.mergeable === "CONFLICTING" ? (
-            <View
-              style={{
-                backgroundColor: theme.colors.surface0,
-                borderColor: theme.colors.statusDanger,
-                borderRadius: 999,
-                borderWidth: 1,
-                paddingHorizontal: 8,
-                paddingVertical: 2,
-              }}
-            >
-              <Text
-                style={{
-                  color: theme.colors.statusDanger,
-                  fontSize: 11,
-                  fontWeight: "700",
-                }}
-              >
-                {t("resource.badges.conflicting")}
-              </Text>
-            </View>
-          ) : null}
-        </View>
-        <Text
-          accessible
-          accessibilityRole="header"
-          accessibilityLabel={t("resource.actions.resourceLabel", {
-            kind: kindLabel,
-            repository: resource.repository,
-            number: resource.number,
-            title: resource.title,
-          })}
-          numberOfLines={1}
-          style={{
-            color: theme.colors.foregroundMuted,
-            flex: 1,
-            fontSize: 12,
-            fontWeight: "700",
-          }}
-        >
-          {resource.repository}
-        </Text>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={
-            refreshing
-              ? t("resource.actions.refreshingItem")
-              : t("resource.actions.refreshItem")
-          }
-          accessibilityState={{ disabled: refreshing }}
-          disabled={refreshing}
-          onPress={() => onRefresh(resource)}
-          style={{
-            alignItems: "center",
-            backgroundColor: theme.colors.surface0,
-            borderColor: theme.colors.border,
-            borderRadius: 999,
-            borderWidth: 1,
-            height: 28,
-            justifyContent: "center",
-            opacity: refreshing ? 0.6 : 1,
-            width: 28,
-          }}
-        >
-          <Text
-            accessibilityLiveRegion="polite"
-            style={{
-              color: theme.colors.accent,
-              fontSize: 17,
-              fontWeight: "700",
-            }}
+              </Pressable>
+            ))}
+          </View>
+        </>
+      ) : null}
+      <Text
+        style={{
+          color: theme.colors.foregroundMuted,
+          fontSize: 11,
+          fontWeight: "700",
+        }}
+      >
+        {t("workbench.filterWorkflow")}
+      </Text>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+        {bucketOptions.map((value) => (
+          <Pressable
+            key={value}
+            accessibilityRole="button"
+            accessibilityLabel={
+              value === "all"
+                ? t("filters.buckets.all")
+                : t(
+                    `filters.buckets.${value === "needs-attention" ? "needsAttention" : value === "being-handled" ? "beingHandled" : value}`,
+                  )
+            }
+            accessibilityState={{ selected: bucket === value }}
+            onPress={() => setBucket(value)}
+            style={button(bucket === value)}
           >
-            ↻
-          </Text>
-        </Pressable>
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+              {value === "all"
+                ? t("filters.buckets.all")
+                : t(
+                    `filters.buckets.${value === "needs-attention" ? "needsAttention" : value === "being-handled" ? "beingHandled" : value}`,
+                  )}
+            </Text>
+          </Pressable>
+        ))}
       </View>
       <Text
         style={{
-          color: theme.colors.foreground,
-          fontSize: compact ? 16 : 18,
+          color: theme.colors.foregroundMuted,
+          fontSize: 11,
           fontWeight: "700",
-          lineHeight: compact ? 21 : 24,
         }}
       >
-        {resource.title}
+        {t("workbench.filterOwnership")}
       </Text>
-      <View
-        style={{
-          alignItems: "center",
-          flexDirection: "row",
-          flexWrap: "wrap",
-          gap: 6,
-        }}
-      >
-        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
-          {t("resource.meta.commentsCount", { count: resource.commentCount })}
-        </Text>
-        {resource.kind === "issue" && resource.milestoneTitle ? (
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+        {(["all", "mine", "assigned", "review"] as const).map((value) => (
           <Pressable
+            key={value}
             accessibilityRole="button"
-            accessibilityLabel={t("resource.actions.selectMilestone", {
-              milestone: resource.milestoneTitle,
-            })}
-            onPress={() => {
-              const title = resource.milestoneTitle;
-              if (title) onSelectMilestone({ kind: "named", title });
-            }}
-            style={resourcePill}
+            accessibilityLabel={
+              value === "all"
+                ? t("filters.kinds.all")
+                : value === "mine"
+                  ? t("filters.mine")
+                  : value === "assigned"
+                    ? t("resource.badges.assigned")
+                    : t("resource.badges.review")
+            }
+            accessibilityState={{ selected: ownership === value }}
+            onPress={() => setOwnership(value)}
+            style={button(ownership === value)}
           >
-            <Text
-              style={{
-                color: theme.colors.accent,
-                fontSize: 12,
-                fontWeight: "600",
-              }}
-            >
-              {resource.milestoneTitle}
-            </Text>
-          </Pressable>
-        ) : null}
-        {relationshipBadges.map((badge) => (
-          <View key={badge} style={resourcePill}>
-            <Text
-              style={{
-                color: theme.colors.foregroundMuted,
-                fontSize: 11,
-                fontWeight: "700",
-              }}
-            >
-              {badge}
-            </Text>
-          </View>
-        ))}
-        {resource.labels.map((label) => (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={t("resource.actions.selectLabel", { label })}
-            key={label}
-            onPress={() => onSelectLabel(label)}
-            style={resourcePill}
-          >
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
-              {label}
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+              {value === "all"
+                ? t("filters.kinds.all")
+                : value === "mine"
+                  ? t("filters.mine")
+                  : value === "assigned"
+                    ? t("resource.badges.assigned")
+                    : t("resource.badges.review")}
             </Text>
           </Pressable>
         ))}
-        {referencedTargets.map((target) => (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={t("resource.relationships.focusResource", {
-              number: target.number,
-            })}
-            key={target.key}
-            onPress={() => onFocusReference(target)}
-            style={resourcePill}
-          >
-            <Text
-              style={{
-                color: theme.colors.accent,
-                fontSize: 12,
-                fontWeight: "600",
-              }}
-            >
-              {t("resource.meta.linkedReference", { number: target.number })}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
-      {resource.kind === "pull-request" ? (
-        <PullRequestChecks resource={resource} theme={theme} />
-      ) : null}
-      {primaryAgent ? (
-        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
-          {t("resource.meta.agentSummary", {
-            title: primaryAgent.title ?? primaryAgent.id,
-          })}
-          {resource.agents.length > 1
-            ? t("resource.meta.moreAgents", {
-                count: resource.agents.length - 1,
-              })
-            : ""}
-        </Text>
-      ) : null}
-      <View
-        style={{
-          alignItems: "center",
-          borderColor: theme.colors.border,
-          borderTopWidth: 1,
-          flexDirection: "row",
-          flexWrap: "wrap",
-          gap: 8,
-          paddingTop: compact ? 8 : 10,
-        }}
-      >
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={
-            ensuringWorkspace
-              ? t("resource.actions.creatingWorkspace")
-              : resource.workspaceIds[0]
-                ? t("resource.actions.openWorkspace")
-                : t("resource.actions.createWorkspace")
-          }
-          accessibilityState={{ disabled: ensuringWorkspace }}
-          disabled={ensuringWorkspace}
-          onPress={() => onEnsureWorkspace(resource)}
-          style={{
-            backgroundColor: theme.colors.accent,
-            borderRadius: 8,
-            opacity: ensuringWorkspace ? 0.6 : 1,
-            paddingHorizontal: 12,
-            paddingVertical: 8,
-          }}
-        >
-          <Text
-            accessibilityLiveRegion="polite"
-            style={{ color: theme.colors.surface0, fontWeight: "700" }}
-          >
-            {ensuringWorkspace
-              ? t("resource.actions.creatingWorkspace")
-              : resource.workspaceIds[0]
-                ? t("resource.actions.openWorkspace")
-                : t("resource.actions.createWorkspace")}
-          </Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={t("resource.actions.openOnGitHub")}
-          onPress={openExternal}
-          style={{
-            backgroundColor: theme.colors.surface0,
-            borderColor: theme.colors.border,
-            borderRadius: 8,
-            borderWidth: 1,
-            paddingHorizontal: 10,
-            paddingVertical: 7,
-          }}
-        >
-          <Text style={{ color: theme.colors.accent, fontWeight: "600" }}>
-            {t("resource.actions.openOnGitHub")}
-          </Text>
-        </Pressable>
-        {primaryAgent && navigation ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={t("resource.actions.openAgent")}
-            onPress={() => navigation.openAgent({ agentId: primaryAgent.id })}
-            style={{
-              backgroundColor: theme.colors.surface0,
-              borderColor: theme.colors.border,
-              borderRadius: 8,
-              borderWidth: 1,
-              paddingHorizontal: 10,
-              paddingVertical: 7,
-            }}
-          >
-            <Text style={{ color: theme.colors.accent, fontWeight: "600" }}>
-              {t("resource.actions.openAgent")}
-            </Text>
-          </Pressable>
-        ) : null}
       </View>
     </View>
   );
@@ -1022,606 +1019,575 @@ export function Workbench({
   host,
   navigation,
   scope,
-  showDiagnostics = true,
 }: WorkbenchProps) {
   const { t } = useTranslation();
   const listResources = useRpc(listResourcesRpc);
+  const refreshResource = useRpc(refreshResourceRpc);
+  const ensureResourceWorkspace = useRpc(ensureResourceWorkspaceRpc);
   const queryClient = useQueryClient();
-  const [quickFilter, setQuickFilter] = useState<QuickResourceFilter>(null);
-  const [resourceKind, setResourceKind] = useState<ResourceKind | "all">("all");
-  const [sort, setSort] = useState<ResourceSortDimension>("updated");
-  const [sortDirection, setSortDirection] =
-    useState<ResourceSortDirection>("desc");
-  const [bucket, setBucket] = useState("all");
-  const [activeLabel, setActiveLabel] = useState<string | null>(null);
-  const [milestone, setMilestone] = useState<MilestoneFilter>(null);
+  const toast = useToast();
+  const [tab, setTab] = useState<ContentTab>("all");
   const [search, setSearch] = useState("");
-  const [activeFocus, setActiveFocus] = useState<string | null>(null);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [status, setStatus] = useState<StatusFilter>("open");
+  const [bucket, setBucket] = useState<
+    ResourceClassification["bucket"] | "all"
+  >("all");
+  const [ownership, setOwnership] = useState<OwnershipFilter>("all");
+  const [repository, setRepository] = useState<string | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [refreshingKey, setRefreshingKey] = useState<string | null>(null);
+  const [pendingCounts, setPendingCounts] = useState(
+    () => new Map<string, number>(),
+  );
+  const [listWidth, setListWidth] = useState<number | null>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+  const dragStartWidth = useRef(0);
+  const dragStartPageX = useRef(0);
   const directory = usePaseoDirectory(host.id);
+  const queryKey = [
+    "github-workbench",
+    host.id,
+    scope.scope,
+    scope.scope === "repository" ? scope.repository : null,
+    status,
+  ] as const;
+  const scopeKey =
+    scope.scope === "repository" ? `repository:${scope.repository}` : "account";
   const query = useQuery({
-    queryKey: [
-      "github-workbench",
-      host.id,
-      scope?.scope,
-      scope?.scope === "repository" ? scope.repository : null,
-    ],
+    queryKey,
+    refetchInterval: 60_000,
     queryFn: () =>
       listResources(
-        scope?.scope === "repository"
-          ? { scope: "repository", repository: scope.repository }
-          : { scope: "account" },
+        scope.scope === "repository"
+          ? { scope: "repository", repository: scope.repository, state: status }
+          : { scope: "account", state: status },
       ),
-    enabled: Boolean(scope),
-    refetchInterval: 60_000,
   });
   const index = useMemo(
     () => createResourceIndex(query.data?.resources ?? [], directory.data),
     [directory.data, query.data?.resources],
   );
-  const queryResult = useMemo(
+  const repositories = useMemo(
     () =>
-      index.query({
-        focusKey: activeFocus,
-        quickFilter,
-        kind: resourceKind,
-        bucket: bucket as ResourceClassification["bucket"] | "all",
-        label: activeLabel,
-        milestone,
-        search,
-        sort,
-        direction: sortDirection,
-      }),
-    [
-      activeFocus,
-      activeLabel,
-      bucket,
-      index,
-      milestone,
-      quickFilter,
-      resourceKind,
-      search,
-      sort,
-      sortDirection,
-    ],
+      [...new Set(index.resources.map((resource) => resource.repository))].sort(
+        (left, right) => left.localeCompare(right),
+      ),
+    [index.resources],
   );
-  const filtered = queryResult.items;
-  const summary = queryResult.summary;
-  const mineCount = index.stats.mineCount;
-  const draftsCount = index.stats.draftsCount;
-  const milestoneOptions = index.stats.milestoneOptions;
-  const clearFilters = useCallback(() => {
-    setQuickFilter(null);
-    setResourceKind("all");
-    setBucket("all");
-    setActiveLabel(null);
-    setMilestone(null);
-    setSearch("");
-  }, []);
-  const [refreshingKey, setRefreshingKey] = useState<string | null>(null);
-  const toast = useToast();
-  const refreshResource = useRpc(refreshResourceRpc);
-  const ensureResourceWorkspace = useRpc(ensureResourceWorkspaceRpc);
-  const ensureWorkspaceMutation = useMutation({
-    mutationFn: ensureResourceWorkspace,
-  });
-  const [pendingWorkspaceCounts, setPendingWorkspaceCounts] = useState(
-    () => new Map<string, number>(),
+  useEffect(() => {
+    void scopeKey;
+    setRepository(null);
+    setSelectedKey(null);
+  }, [scopeKey]);
+  useEffect(() => {
+    if (repository && !repositories.includes(repository)) setRepository(null);
+    if (
+      selectedKey &&
+      !index.resources.some((resource) => resource.key === selectedKey)
+    ) {
+      setSelectedKey(null);
+    }
+  }, [index.resources, repository, repositories, selectedKey]);
+  const rows = useMemo(
+    () =>
+      index
+        .query({
+          focusKey: null,
+          quickFilter: null,
+          kind:
+            tab === "issue"
+              ? "issue"
+              : tab === "pull-request" || tab === "review"
+                ? "pull-request"
+                : "all",
+          lifecycleState: status,
+          bucket,
+          label: null,
+          milestone: null,
+          search,
+          sort: "updated",
+          direction: "desc",
+        })
+        .items.filter(
+          ({ resource }) =>
+            (!repository || resource.repository === repository) &&
+            !((tab === "mine" || ownership === "mine") && !resource.isMine) &&
+            !(
+              (tab === "review" || ownership === "review") &&
+              !(
+                resource.kind === "pull-request" &&
+                resource.reviewRequestedFromMe
+              )
+            ) &&
+            !(ownership === "assigned" && !resource.isAssignedToMe),
+        ),
+    [bucket, index, ownership, repository, search, status, tab],
   );
-  const ensureWorkspace = useCallback(
-    (resource: GitHubResource) => {
-      setPendingWorkspaceCounts((counts) =>
-        adjustPendingResourceCount(counts, resource.key, 1),
-      );
-      ensureWorkspaceMutation.mutate(
-        {
-          kind: resource.kind,
-          repository: resource.repository,
-          number: resource.number,
-          title: resource.title,
-        },
-        {
-          onSuccess: (result) => {
-            setPendingWorkspaceCounts((counts) =>
-              adjustPendingResourceCount(counts, resource.key, -1),
-            );
-            if (
-              (result.action === "opened" || result.action === "created") &&
-              result.workspaceId
-            ) {
-              navigation?.openWorkspace?.({ workspaceId: result.workspaceId });
-              toast.show(
-                result.action === "created"
-                  ? t("resource.toasts.workspaceCreated")
-                  : t("resource.toasts.workspaceOpened"),
-                { variant: "success" },
-              );
-              queryClient.invalidateQueries({
-                queryKey: ["github-workbench", host.id, "directory"],
-              });
-              return;
-            }
-            toast.error(
-              t(
-                result.action === "local-project-not-found"
-                  ? "resource.errors.localProjectNotFound"
-                  : result.action === "base-branch-unavailable"
-                    ? "resource.errors.baseBranchUnavailable"
-                    : "resource.errors.ensureWorkspaceFailed",
-              ),
-            );
-          },
-          onError: (error) => {
-            setPendingWorkspaceCounts((counts) =>
-              adjustPendingResourceCount(counts, resource.key, -1),
-            );
-            toast.error(
-              error instanceof Error
-                ? error.message
-                : t("resource.errors.ensureWorkspaceFailed"),
-            );
-          },
-        },
-      );
-    },
-    [ensureWorkspaceMutation, host.id, navigation, queryClient, t, toast],
-  );
-  const refreshMutation = useMutation({ mutationFn: refreshResource });
-  const refreshItem = useCallback(
-    (resource: GitHubResource) => {
-      setRefreshingKey(resource.key);
-      refreshMutation.mutate(
-        {
-          kind: resource.kind,
-          repository: resource.repository,
-          number: resource.number,
-        },
-        {
-          onSuccess: ({ resource: refreshed }) => {
-            queryClient.setQueryData(
-              [
-                "github-workbench",
-                host.id,
-                scope?.scope,
-                scope?.scope === "repository" ? scope.repository : null,
-              ],
-              (current: { resources?: GitHubResource[] } | undefined) =>
-                current
-                  ? {
-                      ...current,
-                      resources: current.resources?.map((item) =>
-                        item.key === refreshed.key
-                          ? mergeRefreshedResource(item, refreshed)
-                          : item,
-                      ),
-                    }
-                  : current,
-            );
-            setRefreshingKey(null);
-            toast.show(
-              t("resource.toasts.refreshedItem", {
-                repository: resource.repository,
-                number: resource.number,
-              }),
-              { variant: "success" },
-            );
-          },
-          onError: () => {
-            setRefreshingKey(null);
-            toast.error(t("resource.toasts.refreshFailed"));
-          },
-        },
-      );
-    },
-    [host.id, queryClient, refreshMutation, scope, t, toast.error, toast.show],
-  );
+  const selected =
+    rows.find((item) => item.resource.key === selectedKey)?.resource ?? null;
+  useEffect(() => {
+    if (
+      selectedKey &&
+      !rows.some((item) => item.resource.key === selectedKey)
+    ) {
+      setSelectedKey(null);
+    }
+  }, [rows, selectedKey]);
+  const showingDetail = layout.compact && selected !== null;
+  const count = (contentTab: ContentTab) =>
+    index.resources.filter(
+      (resource) =>
+        contentTab === "all" ||
+        (contentTab === "issue" && resource.kind === "issue") ||
+        (contentTab === "pull-request" && resource.kind === "pull-request") ||
+        (contentTab === "mine" && resource.isMine) ||
+        (contentTab === "review" &&
+          resource.kind === "pull-request" &&
+          resource.reviewRequestedFromMe),
+    ).length;
   const refresh = useCallback(() => {
-    if (!scope) return;
     queryClient
       .fetchQuery({
-        queryKey: [
-          "github-workbench",
-          host.id,
-          scope.scope,
-          scope.scope === "repository" ? scope.repository : null,
-          "forced",
-        ],
+        queryKey: [...queryKey, "forced"],
         queryFn: () =>
           listResources(
             scope.scope === "repository"
               ? {
                   scope: "repository",
                   repository: scope.repository,
+                  state: status,
                   forceRefresh: true,
                 }
-              : { scope: "account", forceRefresh: true },
+              : { scope: "account", state: status, forceRefresh: true },
           ),
       })
       .then(() => query.refetch())
       .catch(() => undefined);
-  }, [host.id, listResources, query, queryClient, scope]);
-  const styles = useMemo(
-    () => ({
-      screen: {
-        backgroundColor: theme.colors.surface0,
-        flex: 1,
-        gap: layout.compact ? 10 : 14,
-        padding: layout.compact ? 12 : 20,
-      },
-      title: {
-        color: theme.colors.foreground,
-        fontSize: layout.compact ? 20 : 24,
-        fontWeight: "700" as const,
-      },
-      muted: { color: theme.colors.foregroundMuted },
-      panel: {
-        backgroundColor: theme.colors.surface1,
-        borderColor: theme.colors.border,
-        borderRadius: layout.compact ? 10 : 12,
-        borderWidth: 1,
-        gap: layout.compact ? 8 : 10,
-        padding: layout.compact ? 10 : 12,
-      },
-      toolbarRow: {
-        alignItems: "center" as const,
-        flexDirection: "row" as const,
-        flexWrap: "wrap" as const,
-        gap: layout.compact ? 6 : 8,
-      },
-      chip: {
-        borderColor: theme.colors.border,
-        borderRadius: 999,
-        borderWidth: 1,
-        paddingHorizontal: 9,
-        paddingVertical: layout.compact ? 5 : 6,
-      },
-      activeChip: {
-        backgroundColor: theme.colors.accent,
-        borderColor: theme.colors.accent,
-      },
-      input: {
-        backgroundColor: theme.colors.surface0,
-        borderColor: theme.colors.border,
-        borderWidth: 1,
-        borderRadius: 8,
-        color: theme.colors.foreground,
-        flex: 1,
-        minWidth: layout.compact ? 150 : 220,
-        padding: layout.compact ? 8 : 10,
-      },
-      action: {
-        borderColor: theme.colors.border,
-        borderRadius: 8,
-        borderWidth: 1,
-        paddingHorizontal: 10,
-        paddingVertical: 7,
-      },
-      primaryAction: {
-        backgroundColor: theme.colors.accent,
-        borderColor: theme.colors.accent,
-      },
-    }),
-    [layout.compact, theme],
+  }, [listResources, query, queryClient, queryKey, scope, status]);
+  const refreshItem = useCallback(
+    (resource: GitHubResource) => {
+      setRefreshingKey(resource.key);
+      refreshResource({
+        kind: resource.kind,
+        repository: resource.repository,
+        number: resource.number,
+      })
+        .then(({ resource: refreshed }) => {
+          queryClient.setQueryData(
+            queryKey,
+            (current: { resources?: GitHubResource[] } | undefined) =>
+              current
+                ? {
+                    ...current,
+                    resources: current.resources?.map((item) =>
+                      item.key === refreshed.key
+                        ? mergeRefreshedResource(item, refreshed)
+                        : item,
+                    ),
+                  }
+                : current,
+          );
+          setRefreshingKey(null);
+        })
+        .catch(() => {
+          setRefreshingKey(null);
+          toast.error(t("resource.toasts.refreshFailed"));
+        });
+    },
+    [queryClient, queryKey, refreshResource, t, toast],
   );
-
-  const kindOptions = useMemo<
-    Array<{ key: ResourceKind | "all"; label: string }>
-  >(
-    () => [
-      { key: "all", label: t("filters.kinds.all") },
-      { key: "pull-request", label: t("filters.kinds.pullRequest") },
-      { key: "issue", label: t("filters.kinds.issue") },
-    ],
-    [t],
+  const ensure = useCallback(
+    (resource: GitHubResource) => {
+      setPendingCounts((counts) =>
+        adjustPendingResourceCount(counts, resource.key, 1),
+      );
+      ensureResourceWorkspace({
+        kind: resource.kind,
+        repository: resource.repository,
+        number: resource.number,
+        title: resource.title,
+      })
+        .then((result) => {
+          setPendingCounts((counts) =>
+            adjustPendingResourceCount(counts, resource.key, -1),
+          );
+          if (
+            (result.action === "opened" || result.action === "created") &&
+            result.workspaceId
+          ) {
+            navigation?.openWorkspace?.({ workspaceId: result.workspaceId });
+            toast.show(
+              result.action === "created"
+                ? t("resource.toasts.workspaceCreated")
+                : t("resource.toasts.workspaceOpened"),
+              { variant: "success" },
+            );
+            queryClient.invalidateQueries({
+              queryKey: ["github-workbench", host.id, "directory"],
+            });
+            return;
+          }
+          toast.error(
+            t(
+              result.action === "local-project-not-found"
+                ? "resource.errors.localProjectNotFound"
+                : result.action === "base-branch-unavailable"
+                  ? "resource.errors.baseBranchUnavailable"
+                  : "resource.errors.ensureWorkspaceFailed",
+            ),
+          );
+        })
+        .catch((error) => {
+          setPendingCounts((counts) =>
+            adjustPendingResourceCount(counts, resource.key, -1),
+          );
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : t("resource.errors.ensureWorkspaceFailed"),
+          );
+        });
+    },
+    [ensureResourceWorkspace, host.id, navigation, queryClient, t, toast],
   );
-
-  const bucketOptions = useMemo<
-    Array<{
-      key: "all" | ResourceClassification["bucket"];
-      label: string;
-    }>
-  >(
-    () => [
-      { key: "all", label: t("filters.buckets.all") },
-      { key: "needs-attention", label: t("filters.buckets.needsAttention") },
-      { key: "being-handled", label: t("filters.buckets.beingHandled") },
-      { key: "waiting", label: t("filters.buckets.waiting") },
-      { key: "ready", label: t("filters.buckets.ready") },
-      { key: "open", label: t("filters.buckets.open") },
-    ],
-    [t],
-  );
-
-  if (!scope)
-    return (
-      <View style={styles.screen}>
-        <Text style={styles.muted}>{t("workbench.noScopeDescription")}</Text>
-      </View>
-    );
-
-  const compactDiagnostics = showDiagnostics ? (
-    <GitHubDiagnosticsStatus
-      compact={layout.compact}
-      hostId={host.id}
-      theme={theme}
-    />
-  ) : null;
-
-  return (
-    <View style={styles.screen}>
-      {compactDiagnostics ? (
-        <View style={{ alignItems: "flex-end" }}>{compactDiagnostics}</View>
-      ) : null}
-      {activeFocus ? (
-        <View style={styles.toolbarRow}>
-          <Text
-            accessibilityLiveRegion="polite"
-            style={{ color: theme.colors.foreground, fontWeight: "600" }}
+  const tabs: Array<{ key: ContentTab; label: string }> = [
+    { key: "all", label: t("filters.kinds.all") },
+    { key: "issue", label: t("filters.kinds.issue") },
+    { key: "pull-request", label: t("filters.kinds.pullRequest") },
+    { key: "mine", label: t("filters.mine") },
+    { key: "review", label: t("resource.badges.review") },
+  ];
+  const activeListWidth =
+    listWidth ?? clampWorkbenchListWidth(containerWidth, containerWidth * 0.5);
+  const list = (
+    <View
+      style={{
+        borderRightColor: theme.colors.border,
+        borderRightWidth: layout.compact ? 0 : 1,
+        flexBasis: layout.compact ? undefined : activeListWidth,
+        flexGrow: layout.compact ? 0 : 0,
+        flexShrink: 0,
+        minHeight: layout.compact ? 300 : undefined,
+      }}
+    >
+      <View
+        style={{
+          borderBottomColor: theme.colors.border,
+          borderBottomWidth: 1,
+          gap: 12,
+          padding: layout.compact ? 12 : 16,
+          position: "relative",
+          zIndex: filterOpen ? 20 : 1,
+        }}
+      >
+        <View
+          style={{
+            alignItems: "center",
+            flexDirection: "row",
+            justifyContent: "space-between",
+          }}
+        >
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ gap: 4 }}
+            style={{ flex: 1 }}
           >
-            {t("resource.relationships.activeFocus", {
-              number: index.get(activeFocus)?.number ?? activeFocus,
-            })}
-          </Text>
+            {tabs.map(({ key, label }) => (
+              <Pressable
+                key={key}
+                accessibilityRole="button"
+                accessibilityState={{ selected: tab === key }}
+                onPress={() => setTab(key)}
+                style={{
+                  borderBottomColor:
+                    tab === key ? theme.colors.accent : "transparent",
+                  borderBottomWidth: 2,
+                  paddingHorizontal: 7,
+                  paddingVertical: 5,
+                }}
+              >
+                <Text
+                  style={{
+                    color:
+                      tab === key
+                        ? theme.colors.foreground
+                        : theme.colors.foregroundMuted,
+                    fontSize: 12,
+                    fontWeight: tab === key ? "700" : "500",
+                  }}
+                >
+                  {label} ({count(key)})
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={t("resource.relationships.clearFocus")}
-            onPress={() => setActiveFocus(null)}
-            style={[styles.action, styles.primaryAction]}
+            accessibilityLabel={t("workbench.refresh")}
+            onPress={refresh}
+            style={{ paddingHorizontal: 3, paddingVertical: 5 }}
           >
-            <Text style={{ color: theme.colors.surface0, fontWeight: "700" }}>
-              {t("resource.relationships.clearFocus")}
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 15 }}>
+              ↻
             </Text>
           </Pressable>
         </View>
-      ) : null}
-      <View style={styles.panel}>
-        <View style={styles.toolbarRow}>
+        <View
+          style={{
+            alignItems: "center",
+            flexDirection: "row",
+            gap: 8,
+            position: "relative",
+            zIndex: filterOpen ? 20 : 1,
+          }}
+        >
           <TextInput
             accessibilityLabel={t("workbench.searchAriaLabel")}
             value={search}
             onChangeText={setSearch}
             placeholder={t("workbench.searchPlaceholder")}
             placeholderTextColor={theme.colors.foregroundMuted}
-            style={styles.input}
+            style={{
+              backgroundColor: theme.colors.surface1,
+              borderColor: theme.colors.border,
+              borderRadius: 7,
+              borderWidth: 1,
+              color: theme.colors.foreground,
+              flex: 1,
+              fontSize: 13,
+              paddingHorizontal: 10,
+              paddingVertical: 8,
+            }}
           />
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={t("workbench.refresh")}
-            onPress={refresh}
-            style={[styles.action, styles.primaryAction]}
-          >
-            <Text style={{ color: theme.colors.surface0, fontWeight: "700" }}>
-              {t("workbench.refresh")}
-            </Text>
-          </Pressable>
-          <ToolbarGroup>
-            {kindOptions.map((item) => (
-              <FilterChip
-                key={item.key}
-                label={item.label}
-                onPress={() => setResourceKind(item.key)}
-                selected={resourceKind === item.key}
-                styles={styles}
-                theme={theme}
-              />
-            ))}
-          </ToolbarGroup>
-          <ToolbarGroup>
-            {(["mine", "drafts"] as const).map((item) => {
-              const count = item === "mine" ? mineCount : draftsCount;
-              const label =
-                item === "mine"
-                  ? t("filters.mineWithCount", { count })
-                  : t("filters.draftsWithCount", { count });
-              return (
-                <FilterChip
-                  key={item}
-                  label={label}
-                  onPress={() =>
-                    setQuickFilter(quickFilter === item ? null : item)
-                  }
-                  selected={quickFilter === item}
-                  styles={styles}
-                  theme={theme}
-                />
-              );
-            })}
-          </ToolbarGroup>
-        </View>
-        <View style={styles.toolbarRow}>
-          <ToolbarGroup>
-            {bucketOptions.map((item) => (
-              <FilterChip
-                key={item.key}
-                label={item.label}
-                onPress={() => setBucket(item.key)}
-                selected={bucket === item.key}
-                styles={styles}
-                theme={theme}
-              />
-            ))}
-          </ToolbarGroup>
-          <View
-            style={{
-              backgroundColor: theme.colors.border,
-              height: 16,
-              marginHorizontal: 4,
-              width: 1,
-            }}
-          />
-          {milestoneOptions.length > 0 ? (
-            <ToolbarGroup>
-              <FilterChip
-                label={t("filters.noMilestone")}
-                onPress={() => setMilestone({ kind: "none" })}
-                selected={milestone?.kind === "none"}
-                styles={styles}
-                theme={theme}
-              />
-              {milestoneOptions.map((item) => (
-                <FilterChip
-                  key={item}
-                  label={item}
-                  onPress={() => setMilestone({ kind: "named", title: item })}
-                  selected={
-                    milestone?.kind === "named" && milestone.title === item
-                  }
-                  styles={styles}
-                  theme={theme}
-                />
-              ))}
-            </ToolbarGroup>
-          ) : null}
-          {activeLabel ? (
-            <FilterChip
-              label={`${t("filters.activeLabel", { label: activeLabel })} ×`}
-              onPress={() => setActiveLabel(null)}
-              selected
-              styles={styles}
-              theme={theme}
-            />
-          ) : null}
-          {milestone ? (
-            <FilterChip
-              label={`${milestone.kind === "none" ? t("filters.noMilestone") : t("filters.activeMilestone", { milestone: milestone.title })} ×`}
-              onPress={() => setMilestone(null)}
-              selected
-              styles={styles}
-              theme={theme}
-            />
-          ) : null}
-          <ToolbarGroup>
-            {(["updated", "priority", "created", "comments"] as const).map(
-              (item) => (
-                <FilterChip
-                  key={item}
-                  label={t(`sort.${item}`)}
-                  onPress={() => setSort(item)}
-                  selected={sort === item}
-                  styles={styles}
-                  theme={theme}
-                />
-              ),
-            )}
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={
-                sortDirection === "asc"
-                  ? t("sort.directionAsc")
-                  : t("sort.directionDesc")
-              }
-              onPress={() =>
-                setSortDirection((value) => (value === "asc" ? "desc" : "asc"))
-              }
-              style={styles.action}
-            >
-              <Text
-                style={{
-                  color: theme.colors.foregroundMuted,
-                  fontSize: 12,
-                  fontWeight: "600",
-                }}
-              >
-                {sortDirection === "asc" ? "↑" : "↓"}{" "}
-                {sortDirection === "asc"
-                  ? t("sort.directionAsc")
-                  : t("sort.directionDesc")}
-              </Text>
-            </Pressable>
-          </ToolbarGroup>
-          <View
+            accessibilityLabel={t("workbench.filters")}
+            accessibilityState={{ expanded: filterOpen }}
+            onPress={() => setFilterOpen((open) => !open)}
             style={{
               alignItems: "center",
-              flexDirection: "row",
-              flexGrow: 1,
-              flexWrap: "wrap",
-              gap: 6,
-              justifyContent: "flex-end",
+              backgroundColor: filterOpen
+                ? theme.colors.surface2
+                : theme.colors.surface1,
+              borderColor: theme.colors.border,
+              borderRadius: 7,
+              borderWidth: 1,
+              height: 36,
+              justifyContent: "center",
+              width: 36,
             }}
           >
-            <Text
+            <FilterIcon color={theme.colors.foreground} />
+          </Pressable>
+          {filterOpen ? (
+            <View
               style={{
-                color: theme.colors.foreground,
-                fontSize: 12,
-                fontWeight: "700",
+                elevation: 10,
+                maxWidth: "100%",
+                position: "absolute",
+                right: 0,
+                top: 42,
+                width: layout.compact ? "100%" : 408,
+                zIndex: 30,
               }}
             >
-              {t("summary.total", { count: summary.total })}
-            </Text>
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
-              {t("summary.pullRequests", { count: summary.pullRequests })}
-            </Text>
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
-              {t("summary.issues", { count: summary.issues })}
-            </Text>
-            {summary.needsAttention ? (
-              <Text
-                style={{
-                  color: theme.colors.statusDanger,
-                  fontSize: 12,
-                  fontWeight: "700",
-                }}
-              >
-                {t("summary.needsAttention", { count: summary.needsAttention })}
-              </Text>
-            ) : null}
-          </View>
+              <FilterPopover
+                theme={theme}
+                status={status}
+                bucket={bucket}
+                ownership={ownership}
+                repository={repository}
+                repositories={repositories}
+                showRepositoryFilter={scope.scope === "account"}
+                setStatus={setStatus}
+                setBucket={setBucket}
+                setOwnership={setOwnership}
+                setRepository={setRepository}
+              />
+            </View>
+          ) : null}
         </View>
+        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+          {t("summary.total", { count: rows.length })}
+        </Text>
       </View>
       {query.data?.warnings.map((warning) => (
-        <Text key={warning.code} style={{ color: theme.colors.statusWarning }}>
+        <Text
+          key={warning.code}
+          style={{
+            color: theme.colors.statusWarning,
+            fontSize: 12,
+            paddingHorizontal: 16,
+            paddingTop: 10,
+          }}
+        >
           {warning.message}
         </Text>
       ))}
       {query.isLoading || directory.isLoading ? (
-        <Text accessibilityLiveRegion="polite" style={styles.muted}>
+        <Text
+          accessibilityLiveRegion="polite"
+          style={{ color: theme.colors.foregroundMuted, padding: 16 }}
+        >
           {t("workbench.loading")}
         </Text>
       ) : null}
       {query.error ? (
         <Text
           accessibilityLiveRegion="polite"
-          style={{ color: theme.colors.statusDanger }}
+          style={{ color: theme.colors.statusDanger, padding: 16 }}
         >
           {query.error instanceof Error
             ? query.error.message
             : t("workbench.unableToLoad")}
         </Text>
       ) : null}
-      <ScrollView contentContainerStyle={{ gap: 10, paddingBottom: 24 }}>
-        {filtered.map((item) => (
-          <ResourceRow
-            key={item.resource.key}
-            item={item}
+      <ScrollView
+        contentContainerStyle={{ gap: 2, padding: 8 }}
+        style={{ flex: 1 }}
+      >
+        {rows.map(({ resource }) => (
+          <ListRow
+            key={resource.key}
+            resource={resource}
+            selected={selectedKey === resource.key}
+            onPress={() => setSelectedKey(resource.key)}
             theme={theme}
-            navigation={navigation}
-            compact={layout.compact}
-            onSelectLabel={setActiveLabel}
-            onSelectMilestone={setMilestone}
-            onFocusReference={(target) => setActiveFocus(target.key)}
-            onRefresh={refreshItem}
-            refreshing={refreshingKey === item.resource.key}
-            onEnsureWorkspace={ensureWorkspace}
-            ensuringWorkspace={
-              (pendingWorkspaceCounts.get(item.resource.key) ?? 0) > 0
-            }
           />
         ))}
-        {!query.isLoading && filtered.length === 0 ? (
-          <View style={{ alignItems: "center", gap: 10, paddingVertical: 24 }}>
-            <Text style={styles.muted}>{t("workbench.empty")}</Text>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={t("filters.clearAll")}
-              onPress={clearFilters}
-              style={[styles.action, styles.primaryAction]}
-            >
-              <Text style={{ color: theme.colors.surface0, fontWeight: "700" }}>
-                {t("filters.clearAll")}
-              </Text>
-            </Pressable>
-          </View>
+        {!query.isLoading && rows.length === 0 ? (
+          <Text style={{ color: theme.colors.foregroundMuted, padding: 14 }}>
+            {t("workbench.empty")}
+          </Text>
         ) : null}
       </ScrollView>
+    </View>
+  );
+  return (
+    <View style={{ backgroundColor: theme.colors.surface0, flex: 1 }}>
+      {showingDetail ? (
+        <DetailPane
+          resource={selected}
+          theme={theme}
+          navigation={navigation}
+          refreshing={refreshingKey === selected?.key}
+          onRefresh={refreshItem}
+          ensuring={
+            selected ? (pendingCounts.get(selected.key) ?? 0) > 0 : false
+          }
+          onEnsure={ensure}
+          onBack={() => setSelectedKey(null)}
+        />
+      ) : layout.compact ? (
+        <View style={{ flex: 1, flexDirection: "column" }}>
+          {list}
+          <View
+            style={{
+              backgroundColor: theme.colors.surface0,
+              flex: 1,
+              minHeight: 360,
+            }}
+          >
+            <DetailPane
+              resource={selected}
+              theme={theme}
+              navigation={navigation}
+              refreshing={refreshingKey === selected?.key}
+              onRefresh={refreshItem}
+              ensuring={
+                selected ? (pendingCounts.get(selected.key) ?? 0) > 0 : false
+              }
+              onEnsure={ensure}
+            />
+          </View>
+        </View>
+      ) : (
+        <View
+          onLayout={({ nativeEvent }) => {
+            const availableWidth = Math.max(0, nativeEvent.layout.width - 10);
+            setContainerWidth(availableWidth);
+            setListWidth((current) =>
+              clampWorkbenchListWidth(
+                availableWidth,
+                current ?? availableWidth * 0.5,
+              ),
+            );
+          }}
+          style={{ flex: 1, flexDirection: "row" }}
+        >
+          {list}
+          <View
+            accessibilityActions={[
+              { name: "increment", label: t("workbench.expandList") },
+              { name: "decrement", label: t("workbench.shrinkList") },
+            ]}
+            accessibilityLabel={t("workbench.resizeDivider")}
+            accessibilityRole="adjustable"
+            accessibilityValue={{
+              min: 30,
+              max: 70,
+              now: containerWidth
+                ? Math.round((activeListWidth / containerWidth) * 100)
+                : 50,
+            }}
+            onAccessibilityAction={({ nativeEvent }) => {
+              const change = nativeEvent.actionName === "increment" ? 24 : -24;
+              setListWidth((current) =>
+                clampWorkbenchListWidth(
+                  containerWidth,
+                  (current ?? containerWidth * 0.5) + change,
+                ),
+              );
+            }}
+            onResponderGrant={({ nativeEvent }) => {
+              dragStartPageX.current = nativeEvent.pageX;
+              dragStartWidth.current = activeListWidth;
+            }}
+            onResponderMove={({ nativeEvent }) => {
+              setListWidth(
+                clampWorkbenchListWidth(
+                  containerWidth,
+                  dragStartWidth.current +
+                    nativeEvent.pageX -
+                    dragStartPageX.current,
+                ),
+              );
+            }}
+            onStartShouldSetResponder={() => true}
+            onMoveShouldSetResponder={() => true}
+            style={{
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "col-resize" as never,
+              width: 10,
+            }}
+          >
+            <View
+              style={{
+                backgroundColor: theme.colors.border,
+                borderRadius: 2,
+                height: "100%",
+                width: 2,
+              }}
+            />
+          </View>
+          <View style={{ backgroundColor: theme.colors.surface0, flex: 1 }}>
+            <DetailPane
+              resource={selected}
+              theme={theme}
+              navigation={navigation}
+              refreshing={refreshingKey === selected?.key}
+              onRefresh={refreshItem}
+              ensuring={
+                selected ? (pendingCounts.get(selected.key) ?? 0) > 0 : false
+              }
+              onEnsure={ensure}
+            />
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -1630,22 +1596,40 @@ export function useProjectRepositories(
   projectId: string | null,
   hostId: string,
 ) {
-  const directory = usePaseoDirectory(hostId);
-  return useMemo(
-    () => [
-      ...new Set(
-        (directory.data?.workspaces ?? [])
-          .filter(
-            (workspace) =>
-              !workspace.archivingAt &&
-              (projectId === null || workspace.projectId === projectId),
-          )
-          .flatMap((workspace) => {
-            const repository = normalizeGitHubRepository(workspace.remoteUrl);
-            return repository ? [repository] : [];
-          }),
-      ),
-    ],
-    [directory.data?.workspaces, projectId],
+  const paseo = usePaseo();
+  const queryClient = useQueryClient();
+  const queryKey = useMemo(
+    () => ["github-workbench", hostId, "project-repositories", projectId],
+    [hostId, projectId],
   );
+  const query = useQuery({
+    queryKey,
+    enabled: Boolean(projectId),
+    queryFn: async () => {
+      if (!projectId) return [];
+      const repositories = new Set<string>();
+      let cursor: string | undefined;
+      for (let page = 0; page < 10; page += 1) {
+        const response = await paseo.workspaces.list({
+          page: { limit: 200, ...(cursor ? { cursor } : {}) },
+        });
+        for (const workspace of response.entries) {
+          if (workspace.projectId !== projectId || workspace.archivingAt)
+            continue;
+          const repository = normalizeGitHubRepository(
+            workspace.gitRuntime?.remoteUrl,
+          );
+          if (repository) repositories.add(repository);
+        }
+        cursor = response.pageInfo.nextCursor ?? undefined;
+        if (!cursor) break;
+      }
+      return [...repositories].sort((left, right) => left.localeCompare(right));
+    },
+  });
+  useEffect(() => {
+    const invalidate = () => queryClient.invalidateQueries({ queryKey });
+    return paseo.workspaces.subscribe(invalidate);
+  }, [paseo, queryClient, queryKey]);
+  return query.data ?? [];
 }

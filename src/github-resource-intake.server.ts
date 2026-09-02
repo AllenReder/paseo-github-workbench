@@ -2,7 +2,6 @@ import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import type { z } from "zod";
 import {
-  type diagnosticsRpc,
   type GitHubResource,
   type IssueResource,
   type listResourcesRpc,
@@ -23,14 +22,10 @@ export type GitHubResourceIntake = {
   refreshResource(
     input: z.infer<typeof refreshResourceRpc.input>,
   ): Promise<z.infer<typeof refreshResourceRpc.output>>;
-  diagnostics(
-    input: z.infer<typeof diagnosticsRpc.input>,
-  ): Promise<z.infer<typeof diagnosticsRpc.output>>;
 };
 
 type Warning = z.infer<typeof WarningSchema>;
 type CacheValue = z.infer<typeof listResourcesRpc.output>;
-type DiagnosticsValue = z.infer<typeof diagnosticsRpc.output>;
 
 const execFile = promisify(execFileCallback);
 const CACHE_TTL_MS = 30_000;
@@ -39,10 +34,14 @@ const pullRequestJsonFields = [
   "number",
   "title",
   "url",
+  "body",
   "author",
   "headRefName",
   "baseRefName",
   "isDraft",
+  "state",
+  "mergedAt",
+  "closedAt",
   "labels",
   "updatedAt",
   "createdAt",
@@ -56,6 +55,7 @@ const issueJsonFields = [
   "number",
   "title",
   "url",
+  "body",
   "author",
   "assignees",
   "labels",
@@ -63,15 +63,16 @@ const issueJsonFields = [
   "comments",
   "createdAt",
   "updatedAt",
+  "closedAt",
   "state",
 ].join(",");
 
 const accountQuery = `
 query Workbench($authoredPr: String!, $reviewPr: String!, $authoredIssue: String!, $assignedIssue: String!) {
-  authoredPr: search(query: $authoredPr, type: ISSUE, first: 50) { nodes { ... on PullRequest { number title url createdAt updatedAt isDraft headRefName baseRefName mergeable reviewDecision comments { totalCount } author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
-  reviewPr: search(query: $reviewPr, type: ISSUE, first: 50) { nodes { ... on PullRequest { number title url createdAt updatedAt isDraft headRefName baseRefName mergeable reviewDecision comments { totalCount } author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
-  authoredIssue: search(query: $authoredIssue, type: ISSUE, first: 50) { nodes { ... on Issue { number title url createdAt updatedAt author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } milestone { title } comments { totalCount } } } }
-  assignedIssue: search(query: $assignedIssue, type: ISSUE, first: 50) { nodes { ... on Issue { number title url createdAt updatedAt author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } milestone { title } comments { totalCount } } } }
+  authoredPr: search(query: $authoredPr, type: ISSUE, first: 100) { nodes { ... on PullRequest { number title body url state mergedAt closedAt createdAt updatedAt isDraft headRefName baseRefName mergeable reviewDecision comments { totalCount } author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
+  reviewPr: search(query: $reviewPr, type: ISSUE, first: 100) { nodes { ... on PullRequest { number title body url state mergedAt closedAt createdAt updatedAt isDraft headRefName baseRefName mergeable reviewDecision comments { totalCount } author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
+  authoredIssue: search(query: $authoredIssue, type: ISSUE, first: 100) { nodes { ... on Issue { number title body url state closedAt createdAt updatedAt author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } milestone { title } comments { totalCount } } } }
+  assignedIssue: search(query: $assignedIssue, type: ISSUE, first: 100) { nodes { ... on Issue { number title body url state closedAt createdAt updatedAt author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } milestone { title } comments { totalCount } } } }
 }`;
 
 function defaultCommandRunner(
@@ -251,18 +252,34 @@ function makePullRequest(
   const number = asNumber(record.number);
   const url = asString(record.url);
   if (!repository || !number || !url) return null;
+  const rawState = asString(record.state)?.toUpperCase();
+  const mergedAt = asString(record.mergedAt);
+  const closedAt = asString(record.closedAt);
+  const state: PullRequestResource["state"] =
+    rawState === "MERGED" || mergedAt !== null
+      ? "MERGED"
+      : rawState === "CLOSED"
+        ? "CLOSED"
+        : "OPEN";
+  const lifecycleState: PullRequestResource["lifecycleState"] =
+    state === "MERGED" ? "merged" : state === "CLOSED" ? "closed" : "open";
   return {
     key: resourceKey("pull-request", repository, number),
     kind: "pull-request",
     repository,
     number,
     title: asString(record.title) ?? `Pull request #${number}`,
+    body: asString(record.body) ?? "",
     url,
     authorLogin: loginFrom(record.author),
     assigneeLogins: stringsFromNodes(record.assignees, "login"),
     labels: labelsFrom(record.labels),
     createdAt: asString(record.createdAt) ?? new Date(0).toISOString(),
     updatedAt: asString(record.updatedAt) ?? new Date(0).toISOString(),
+    closedAt: closedAt ?? null,
+    mergedAt: mergedAt ?? null,
+    state,
+    lifecycleState,
     commentCount: asNumber(asRecord(record.comments)?.totalCount) ?? 0,
     isMine: flags.isMine,
     isAssignedToMe: false,
@@ -298,18 +315,28 @@ function makeIssue(
   const number = asNumber(record.number);
   const url = asString(record.url);
   if (!repository || !number || !url) return null;
+  const rawState = asString(record.state)?.toUpperCase();
+  const closedAt = asString(record.closedAt);
+  const state: IssueResource["state"] =
+    rawState === "CLOSED" || closedAt !== null ? "CLOSED" : "OPEN";
+  const lifecycleState: IssueResource["lifecycleState"] =
+    state === "CLOSED" ? "closed" : "open";
   return {
     key: resourceKey("issue", repository, number),
     kind: "issue",
     repository,
     number,
     title: asString(record.title) ?? `Issue #${number}`,
+    body: asString(record.body) ?? "",
     url,
     authorLogin: loginFrom(record.author),
     assigneeLogins: stringsFromNodes(record.assignees, "login"),
     labels: labelsFrom(record.labels),
     createdAt: asString(record.createdAt) ?? new Date(0).toISOString(),
     updatedAt: asString(record.updatedAt) ?? new Date(0).toISOString(),
+    closedAt: closedAt ?? null,
+    state,
+    lifecycleState,
     isMine: flags.isMine,
     isAssignedToMe: flags.isAssignedToMe,
     workspaceIds: [],
@@ -355,9 +382,6 @@ export function createGitHubResourceIntake(
   const inFlight = new Map<string, Promise<CacheValue>>();
   const viewerLogins = new Map<string, { value: string; expiresAt: number }>();
   const viewerInFlight = new Map<string, Promise<string>>();
-  let diagnosticsCache: { value: DiagnosticsValue; expiresAt: number } | null =
-    null;
-  let diagnosticsInFlight: Promise<DiagnosticsValue> | null = null;
 
   async function getViewerLogin(): Promise<string> {
     const cached = viewerLogins.get("github.com");
@@ -385,33 +409,42 @@ export function createGitHubResourceIntake(
 
   async function repositoryResources(
     repository: string,
+    state: "open" | "merged" | "closed" = "open",
   ): Promise<GitHubResource[]> {
-    const [pullRequests, issues] = await Promise.all([
+    const prState =
+      state === "merged" ? "merged" : state === "closed" ? "closed" : "open";
+    const issueState = state === "closed" ? "closed" : "open";
+    const queries: Array<Promise<{ stdout: string; stderr: string }>> = [
       run([
         "pr",
         "list",
         "--repo",
         repository,
         "--state",
-        "open",
+        prState,
         "--limit",
         "100",
         "--json",
         pullRequestJsonFields,
       ]),
-      run([
-        "issue",
-        "list",
-        "--repo",
-        repository,
-        "--state",
-        "open",
-        "--limit",
-        "100",
-        "--json",
-        issueJsonFields,
-      ]),
-    ]);
+    ];
+    if (state !== "merged") {
+      queries.push(
+        run([
+          "issue",
+          "list",
+          "--repo",
+          repository,
+          "--state",
+          issueState,
+          "--limit",
+          "100",
+          "--json",
+          issueJsonFields,
+        ]),
+      );
+    }
+    const [pullRequests, issues] = await Promise.all(queries);
     const parse = (text: string) => {
       const value: unknown = JSON.parse(text);
       return Array.isArray(value)
@@ -425,39 +458,53 @@ export function createGitHubResourceIntake(
       ...record,
       repository: { nameWithOwner: repository },
     });
-    return mergeResources([
-      ...parse(pullRequests.stdout).flatMap((record) => {
-        const item = makePullRequest(decorateRepository(record), {
-          isMine: false,
-          reviewRequestedFromMe: false,
-        });
-        return item ? [item] : [];
-      }),
-      ...parse(issues.stdout).flatMap((record) => {
-        const item = makeIssue(decorateRepository(record), {
-          isMine: false,
-          isAssignedToMe: false,
-        });
-        return item ? [item] : [];
-      }),
-    ]);
+    const prItems = parse(pullRequests.stdout).flatMap((record) => {
+      const item = makePullRequest(decorateRepository(record), {
+        isMine: false,
+        reviewRequestedFromMe: false,
+      });
+      return item ? [item] : [];
+    });
+    const issueItems = issues
+      ? parse(issues.stdout).flatMap((record) => {
+          const item = makeIssue(decorateRepository(record), {
+            isMine: false,
+            isAssignedToMe: false,
+          });
+          return item ? [item] : [];
+        })
+      : [];
+    return mergeResources([...prItems, ...issueItems]);
   }
 
-  async function accountResources(): Promise<GitHubResource[]> {
+  async function accountResources(
+    state: "open" | "merged" | "closed" = "open",
+  ): Promise<GitHubResource[]> {
     const viewer = await getViewerLogin();
+    const prQualifier =
+      state === "open"
+        ? "is:open"
+        : state === "merged"
+          ? "is:merged"
+          : "is:closed -is:merged";
+    const issueQualifier = state === "closed" ? "is:closed" : "is:open";
     const { stdout } = await run([
       "api",
       "graphql",
       "-f",
       `query=${accountQuery}`,
       "-f",
-      `authoredPr=is:pr is:open author:${viewer}`,
+      `authoredPr=is:pr ${prQualifier} author:${viewer}`,
       "-f",
-      `reviewPr=is:pr is:open review-requested:${viewer}`,
+      `reviewPr=is:pr ${prQualifier} review-requested:${viewer}`,
       "-f",
-      `authoredIssue=is:issue is:open author:${viewer}`,
+      state === "merged"
+        ? `authoredIssue=is:issue is:closed author:__none__`
+        : `authoredIssue=is:issue ${issueQualifier} author:${viewer}`,
       "-f",
-      `assignedIssue=is:issue is:open assignee:${viewer}`,
+      state === "merged"
+        ? `assignedIssue=is:issue is:closed assignee:__none__`
+        : `assignedIssue=is:issue ${issueQualifier} assignee:${viewer}`,
     ]);
     const root = asRecord(asRecord(JSON.parse(stdout))?.data);
     const nodes = (name: string) => {
@@ -469,7 +516,7 @@ export function createGitHubResourceIntake(
           })
         : [];
     };
-    return mergeResources([
+    const prItems = [
       ...nodes("authoredPr").flatMap((record) => {
         const item = makePullRequest(record, {
           isMine: true,
@@ -484,22 +531,35 @@ export function createGitHubResourceIntake(
         });
         return item ? [item] : [];
       }),
-      ...nodes("authoredIssue").flatMap((record) => {
-        const item = makeIssue(record, { isMine: true, isAssignedToMe: false });
-        return item ? [item] : [];
-      }),
-      ...nodes("assignedIssue").flatMap((record) => {
-        const item = makeIssue(record, { isMine: false, isAssignedToMe: true });
-        return item ? [item] : [];
-      }),
-    ]);
+    ];
+    const issueItems =
+      state === "merged"
+        ? []
+        : [
+            ...nodes("authoredIssue").flatMap((record) => {
+              const item = makeIssue(record, {
+                isMine: true,
+                isAssignedToMe: false,
+              });
+              return item ? [item] : [];
+            }),
+            ...nodes("assignedIssue").flatMap((record) => {
+              const item = makeIssue(record, {
+                isMine: false,
+                isAssignedToMe: true,
+              });
+              return item ? [item] : [];
+            }),
+          ];
+    return mergeResources([...prItems, ...issueItems]);
   }
 
   async function listResources(
     input: z.infer<typeof listResourcesRpc.input>,
   ): Promise<CacheValue> {
     const repository = input.repository?.toLowerCase();
-    const key = `${input.scope}:${repository ?? "account"}`;
+    const state = input.state ?? "open";
+    const key = `${input.scope}:${repository ?? "account"}:${state}`;
     const cached = cache.get(key);
     if (!input.forceRefresh && cached && cached.expiresAt > Date.now())
       return cached.value;
@@ -509,9 +569,9 @@ export function createGitHubResourceIntake(
       try {
         const resources =
           input.scope === "account"
-            ? await accountResources()
+            ? await accountResources(state)
             : repository
-              ? await repositoryResources(repository)
+              ? await repositoryResources(repository, state)
               : [];
         const value = {
           resources,
@@ -572,60 +632,8 @@ export function createGitHubResourceIntake(
     }
   }
 
-  async function diagnostics(
-    input: z.infer<typeof diagnosticsRpc.input>,
-  ): Promise<DiagnosticsValue> {
-    if (
-      !input.forceRefresh &&
-      diagnosticsCache &&
-      diagnosticsCache.expiresAt > Date.now()
-    )
-      return diagnosticsCache.value;
-    if (!input.forceRefresh && diagnosticsInFlight) return diagnosticsInFlight;
-    diagnosticsInFlight = (async () => {
-      try {
-        const [{ stdout: user }, { stdout: rate }] = await Promise.all([
-          run(["api", "user", "--jq", ".login"]),
-          run(["api", "rate_limit", "--jq", ".resources.core"]),
-        ]);
-        const parsed = asRecord(JSON.parse(rate));
-        const reset = asNumber(parsed?.reset);
-        const value: DiagnosticsValue = {
-          viewerLogin: user.trim() || null,
-          remaining: asNumber(parsed?.remaining),
-          limit: asNumber(parsed?.limit),
-          resetAt: reset === null ? null : new Date(reset * 1000).toISOString(),
-          status: "ok",
-          message: null,
-        };
-        diagnosticsCache = { value, expiresAt: Date.now() + CACHE_TTL_MS };
-        return value;
-      } catch (error) {
-        const warning = errorWarning(error);
-        const status =
-          warning.code === "gh-not-authenticated"
-            ? "auth-required"
-            : warning.code === "github-rate-limited"
-              ? "rate-limited"
-              : "unavailable";
-        return {
-          viewerLogin: null,
-          remaining: null,
-          limit: null,
-          resetAt: null,
-          status,
-          message: warning.message,
-        };
-      } finally {
-        diagnosticsInFlight = null;
-      }
-    })();
-    return diagnosticsInFlight;
-  }
-
   return {
     listResources,
     refreshResource,
-    diagnostics,
   };
 }

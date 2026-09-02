@@ -14,6 +14,7 @@ describe("GitHubResourceIntake", () => {
               number: 42,
               title: "Test PR",
               url: "https://github.com/getpaseo/paseo/pull/42",
+              body: "PR list description",
               author: { login: "alice" },
               headRefName: "feature-branch",
               baseRefName: "main",
@@ -48,6 +49,7 @@ describe("GitHubResourceIntake", () => {
             {
               number: 99,
               title: "Test Issue",
+              body: "Issue list description",
               url: "https://github.com/getpaseo/paseo/issues/99",
               author: { login: "bob" },
               assignees: { nodes: [] },
@@ -77,6 +79,13 @@ describe("GitHubResourceIntake", () => {
 
     expect(prCalls).toBe(1);
     expect(issueCalls).toBe(1);
+    expect(
+      first.resources.find((resource) => resource.kind === "pull-request")
+        ?.body,
+    ).toBe("PR list description");
+    expect(
+      first.resources.find((resource) => resource.kind === "issue")?.body,
+    ).toBe("Issue list description");
     expect(first.resources).toHaveLength(2);
     expect(second.resources).toHaveLength(2);
     expect(first.resources[0].key).toBe("pull-request:getpaseo/paseo#42");
@@ -133,6 +142,31 @@ describe("GitHubResourceIntake", () => {
         return { stdout: "octocat\n", stderr: "" };
       }
       if (args[0] === "api" && args[1] === "graphql") {
+        const queryArg =
+          args.find((arg) => arg.startsWith("query=")) ??
+          (args[args.indexOf("-f") + 1]?.startsWith("query=")
+            ? args[args.indexOf("-f") + 1]
+            : undefined);
+        if (!queryArg) {
+          throw new Error("Missing query argument in gh api graphql call");
+        }
+        const rawQuery = queryArg.slice("query=".length);
+
+        // Balanced braces helper
+        let braceDepth = 0;
+        let hadOpenBrace = false;
+        for (const char of rawQuery) {
+          if (char === "{") {
+            braceDepth++;
+            hadOpenBrace = true;
+          } else if (char === "}") {
+            braceDepth--;
+            expect(braceDepth).toBeGreaterThanOrEqual(0);
+          }
+        }
+        expect(hadOpenBrace).toBe(true);
+        expect(braceDepth).toBe(0);
+
         return {
           stdout: JSON.stringify({
             data: {
@@ -221,7 +255,6 @@ describe("GitHubResourceIntake", () => {
       }
       throw new Error(`Unexpected command: ${args.join(" ")}`);
     });
-
     const result = await intake.listResources({ scope: "account" });
     expect(result.resources).toHaveLength(2);
     const pr = result.resources.find((r) => r.kind === "pull-request");
@@ -281,6 +314,7 @@ describe("GitHubResourceIntake", () => {
           stdout: JSON.stringify({
             number: 15,
             title: "Refreshed PR",
+            body: "Refreshed description",
             url: "https://github.com/owner/repo/pull/15",
             author: { login: "dev" },
             headRefName: "feature",
@@ -308,6 +342,7 @@ describe("GitHubResourceIntake", () => {
       number: 15,
     });
 
+    expect(result.resource.body).toBe("Refreshed description");
     expect(result.resource.title).toBe("Refreshed PR");
     if (result.resource.kind === "pull-request") {
       expect(result.resource.reviewDecision).toBe("changes_requested");
@@ -337,54 +372,5 @@ describe("GitHubResourceIntake", () => {
     ).rejects.toThrow(
       "The GitHub repository is unavailable or you do not have access.",
     );
-  });
-
-  it("runs diagnostics and classifies status correctly", async () => {
-    const intake = createGitHubResourceIntake(async (args) => {
-      if (args[0] === "api" && args[1] === "user") {
-        return { stdout: "alice\n", stderr: "" };
-      }
-      if (args[0] === "api" && args[1] === "rate_limit") {
-        return {
-          stdout: JSON.stringify({
-            limit: 5000,
-            remaining: 4950,
-            reset: 1770000000,
-          }),
-          stderr: "",
-        };
-      }
-      throw new Error(`Unexpected command: ${args.join(" ")}`);
-    });
-
-    const diag = await intake.diagnostics({});
-    expect(diag.status).toBe("ok");
-    expect(diag.viewerLogin).toBe("alice");
-    expect(diag.remaining).toBe(4950);
-    expect(diag.limit).toBe(5000);
-    expect(diag.resetAt).toBe(new Date(1770000000 * 1000).toISOString());
-  });
-
-  it("handles auth-required and rate-limited diagnostic states", async () => {
-    const authIntake = createGitHubResourceIntake(async () => {
-      const error = new Error("auth login required") as Error & {
-        stderr: string;
-      };
-      error.stderr = "not logged in to any GitHub hosts";
-      throw error;
-    });
-    const authDiag = await authIntake.diagnostics({});
-    expect(authDiag.status).toBe("auth-required");
-    expect(authDiag.viewerLogin).toBeNull();
-
-    const rateIntake = createGitHubResourceIntake(async () => {
-      const error = new Error("rate limit exceeded") as Error & {
-        stderr: string;
-      };
-      error.stderr = "HTTP 403: API rate limit reached";
-      throw error;
-    });
-    const rateDiag = await rateIntake.diagnostics({});
-    expect(rateDiag.status).toBe("rate-limited");
   });
 });
