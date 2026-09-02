@@ -18,6 +18,7 @@ import {
   type GitHubResource,
   type LifecycleState,
   listResourcesRpc,
+  mergeDetailedResource,
   mergeRefreshedResource,
   normalizeGitHubRepository,
   openExternalUrl,
@@ -45,9 +46,6 @@ const RESOURCE_DETAIL_STALE_TIME_MS = 10 * 60_000;
 
 function resourceDetailQueryKey(hostId: string, resourceKey: string | null) {
   return ["github-workbench", hostId, "resource-detail", resourceKey] as const;
-}
-function resourceDetailQueryPrefix(hostId: string) {
-  return ["github-workbench", hostId, "resource-detail"] as const;
 }
 export function clampWorkbenchListWidth(
   availableWidth: number,
@@ -1165,26 +1163,24 @@ export function Workbench({
       });
     },
   });
+  const detailResource = selectedDetailQuery.data?.resource;
+  const selectedResourceKey = selected?.key ?? null;
+  const selectedUpdatedAt = selected?.updatedAt ?? null;
+  const detailUpdatedAt = detailResource?.updatedAt ?? null;
+  const detailIsBehindSummary = Boolean(
+    selectedUpdatedAt && detailUpdatedAt && detailUpdatedAt < selectedUpdatedAt,
+  );
   const selectedForDetail =
-    selected &&
-    selectedDetailQuery.data?.resource &&
-    selectedDetailQuery.dataUpdatedAt >= query.dataUpdatedAt
-      ? mergeRefreshedResource(selected, selectedDetailQuery.data.resource)
+    selected && detailResource && !detailIsBehindSummary
+      ? mergeDetailedResource(selected, detailResource)
       : selected;
-  const lastListRefreshRef = useRef<string | null>(null);
   useEffect(() => {
-    const refreshedAt = query.data?.refreshedAt;
-    if (!refreshedAt) return;
-    const previousRefreshedAt = lastListRefreshRef.current;
-    lastListRefreshRef.current = refreshedAt;
-    if (previousRefreshedAt === null || previousRefreshedAt === refreshedAt) {
-      return;
-    }
+    if (!selectedResourceKey || !detailIsBehindSummary) return;
     void queryClient.invalidateQueries({
-      queryKey: resourceDetailQueryPrefix(host.id),
+      queryKey: resourceDetailQueryKey(host.id, selectedResourceKey),
       refetchType: "active",
     });
-  }, [host.id, query.data?.refreshedAt, queryClient]);
+  }, [detailIsBehindSummary, host.id, queryClient, selectedResourceKey]);
   useEffect(() => {
     if (
       selectedKey &&
@@ -1217,15 +1213,10 @@ export function Workbench({
         : { scope: "account", state: status, forceRefresh: true },
     )
       .then((data) => {
-        lastListRefreshRef.current = data.refreshedAt;
         queryClient.setQueryData(queryKey, data);
-        void queryClient.invalidateQueries({
-          queryKey: resourceDetailQueryPrefix(host.id),
-          refetchType: "active",
-        });
       })
       .catch(() => undefined);
-  }, [host.id, listResources, queryClient, queryKey, scope, status]);
+  }, [listResources, queryClient, queryKey, scope, status]);
   const refreshItem = useCallback(
     (resource: GitHubResource) => {
       setRefreshingKey(resource.key);

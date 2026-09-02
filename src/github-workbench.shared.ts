@@ -298,6 +298,26 @@ export function mergeRefreshedResource(
   };
 }
 
+/**
+ * Adds fields that are only requested by the on-demand detail query while
+ * keeping the list summary authoritative for all shared fields.
+ */
+export function mergeDetailedResource(
+  summary: GitHubResource,
+  detail: GitHubResource,
+): GitHubResource {
+  if (summary.key !== detail.key || summary.kind !== detail.kind)
+    return summary;
+  if (summary.kind === "pull-request" && detail.kind === "pull-request") {
+    return {
+      ...summary,
+      body: detail.body,
+      checkDetails: detail.checkDetails,
+    };
+  }
+  return { ...summary, body: detail.body };
+}
+
 export function issueBranchSlug(number: number, title: string): string {
   const slug =
     title

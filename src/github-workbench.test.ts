@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   adjustPendingResourceCount,
   issueBranchSlug,
+  mergeDetailedResource,
   mergeRefreshedResource,
   normalizeGitHubRepository,
   openExternalUrl,
@@ -182,6 +183,31 @@ describe("GitHub workbench shared primitives", () => {
     expect(merged.isMine).toBe(true);
     if (merged.kind === "pull-request") {
       expect(merged.reviewRequestedFromMe).toBe(true);
+    }
+  });
+
+  test("merges only detail-only fields over the current summary", () => {
+    const summary = pullRequest({
+      title: "Current title",
+      updatedAt: "2026-02-02T00:00:00Z",
+      body: "",
+      checkDetails: [],
+      labels: ["current"],
+    });
+    const detail = pullRequest({
+      title: "Stale title",
+      updatedAt: "2026-02-01T00:00:00Z",
+      body: "Loaded body",
+      checkDetails: [{ name: "CI", status: "success" }],
+      labels: ["stale"],
+    });
+
+    const merged = mergeDetailedResource(summary, detail);
+    expect(merged.title).toBe("Current title");
+    expect(merged.labels).toEqual(["current"]);
+    expect(merged.body).toBe("Loaded body");
+    if (merged.kind === "pull-request") {
+      expect(merged.checkDetails).toEqual([{ name: "CI", status: "success" }]);
     }
   });
 
