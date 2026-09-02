@@ -1,0 +1,24 @@
+{
+  "name": "paseo-github-workbench",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "check": "biome check .",
+    "check:write": "biome check --write .",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test --preload ./test.setup.ts"
+  },
+  "devDependencies": {
+    "@getpaseo/client": "^0.7.0",
+    "@getpaseo/protocol": "^0.7.0",
+    "@tanstack/react-query": "^5.90.11",
+    "@types/bun": "^1.3.3",
+    "@types/react": "~19.2.0",
+    "@biomejs/biome": "^2.2.0",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "typescript": "^5.9.3",
+    "zod": "^4.4.3"
+  }
+}

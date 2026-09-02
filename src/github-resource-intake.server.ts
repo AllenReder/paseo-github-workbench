@@ -1,0 +1,631 @@
+import { execFile as execFileCallback } from "node:child_process";
+import { promisify } from "node:util";
+import type { z } from "zod";
+import {
+  type diagnosticsRpc,
+  type GitHubResource,
+  type IssueResource,
+  type listResourcesRpc,
+  type PullRequestResource,
+  type refreshResourceRpc,
+  resourceKey,
+  type WarningSchema,
+} from "./github-workbench.shared";
+
+export type GitHubCommandRunner = (
+  args: readonly string[],
+) => Promise<{ stdout: string; stderr: string }>;
+
+export type GitHubResourceIntake = {
+  listResources(
+    input: z.infer<typeof listResourcesRpc.input>,
+  ): Promise<z.infer<typeof listResourcesRpc.output>>;
+  refreshResource(
+    input: z.infer<typeof refreshResourceRpc.input>,
+  ): Promise<z.infer<typeof refreshResourceRpc.output>>;
+  diagnostics(
+    input: z.infer<typeof diagnosticsRpc.input>,
+  ): Promise<z.infer<typeof diagnosticsRpc.output>>;
+};
+
+type Warning = z.infer<typeof WarningSchema>;
+type CacheValue = z.infer<typeof listResourcesRpc.output>;
+type DiagnosticsValue = z.infer<typeof diagnosticsRpc.output>;
+
+const execFile = promisify(execFileCallback);
+const CACHE_TTL_MS = 30_000;
+
+const pullRequestJsonFields = [
+  "number",
+  "title",
+  "url",
+  "author",
+  "headRefName",
+  "baseRefName",
+  "isDraft",
+  "labels",
+  "updatedAt",
+  "createdAt",
+  "reviewDecision",
+  "statusCheckRollup",
+  "mergeable",
+  "comments",
+].join(",");
+
+const issueJsonFields = [
+  "number",
+  "title",
+  "url",
+  "author",
+  "assignees",
+  "labels",
+  "milestone",
+  "comments",
+  "createdAt",
+  "updatedAt",
+  "state",
+].join(",");
+
+const accountQuery = `
+query Workbench($authoredPr: String!, $reviewPr: String!, $authoredIssue: String!, $assignedIssue: String!) {
+  authoredPr: search(query: $authoredPr, type: ISSUE, first: 50) { nodes { ... on PullRequest { number title url createdAt updatedAt isDraft headRefName baseRefName mergeable reviewDecision comments { totalCount } author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
+  reviewPr: search(query: $reviewPr, type: ISSUE, first: 50) { nodes { ... on PullRequest { number title url createdAt updatedAt isDraft headRefName baseRefName mergeable reviewDecision comments { totalCount } author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
+  authoredIssue: search(query: $authoredIssue, type: ISSUE, first: 50) { nodes { ... on Issue { number title url createdAt updatedAt author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } milestone { title } comments { totalCount } } } }
+  assignedIssue: search(query: $assignedIssue, type: ISSUE, first: 50) { nodes { ... on Issue { number title url createdAt updatedAt author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } milestone { title } comments { totalCount } } } }
+}`;
+
+function defaultCommandRunner(
+  args: readonly string[],
+): Promise<{ stdout: string; stderr: string }> {
+  return execFile("gh", args, {
+    timeout: 30_000,
+    maxBuffer: 4 * 1024 * 1024,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  });
+}
+
+function errorWarning(error: unknown): Warning {
+  const record = error as NodeJS.ErrnoException & {
+    stderr?: string;
+    message?: string;
+  };
+  const text = [record.message, record.stderr].filter(Boolean).join("\n");
+  if (record.code === "ENOENT")
+    return {
+      code: "gh-cli-not-found",
+      message: "GitHub CLI (gh) is not installed on the Paseo daemon host.",
+    };
+  if (/authentication|not logged in|auth login/i.test(text))
+    return {
+      code: "gh-not-authenticated",
+      message:
+        "Authenticate gh on the Paseo daemon host before using GitHub Workbench.",
+    };
+  if (/rate limit|api rate limit|HTTP 403/i.test(text))
+    return {
+      code: "github-rate-limited",
+      message: "GitHub API rate limit reached. Try again later.",
+    };
+  if (/HTTP 404|could not resolve to a repository|not found/i.test(text))
+    return {
+      code: "repository-unavailable",
+      message:
+        "The GitHub repository is unavailable or you do not have access.",
+    };
+  return {
+    code: "github-query-failed",
+    message: text || "GitHub CLI query failed.",
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function stringsFromNodes(value: unknown, property = "name"): string[] {
+  const record = asRecord(value);
+  const nodes = Array.isArray(record?.nodes)
+    ? record.nodes
+    : Array.isArray(value)
+      ? value
+      : [];
+  return nodes.flatMap((item) => {
+    const itemRecord = asRecord(item);
+    const candidate = itemRecord ? asString(itemRecord[property]) : null;
+    return candidate ? [candidate] : [];
+  });
+}
+
+function loginFrom(value: unknown): string | null {
+  const record = asRecord(value);
+  return record ? asString(record.login) : null;
+}
+
+function labelsFrom(value: unknown): string[] {
+  return stringsFromNodes(value);
+}
+
+function summarizeChecks(checks: unknown): PullRequestResource["checksStatus"] {
+  if (!Array.isArray(checks) || checks.length === 0) return "none";
+  let sawKnown = false;
+  for (const check of checks) {
+    if (!check || typeof check !== "object") continue;
+    const record = check as Record<string, unknown>;
+    const status =
+      typeof record.status === "string" ? record.status.toUpperCase() : "";
+    if (status && status !== "COMPLETED") return "pending";
+    const conclusion =
+      typeof record.conclusion === "string"
+        ? record.conclusion.toUpperCase()
+        : "";
+    if (
+      ["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"].includes(
+        conclusion,
+      )
+    )
+      return "failure";
+    if (["SUCCESS", "NEUTRAL", "SKIPPED", "STALE"].includes(conclusion))
+      sawKnown = true;
+  }
+  return sawKnown ? "success" : "unknown";
+}
+
+function checkStatusFromGraphql(
+  value: unknown,
+): PullRequestResource["checksStatus"] {
+  if (Array.isArray(value)) return summarizeChecks(value);
+  const rollup = asRecord(value);
+  if (!rollup) return "none";
+  const state = asString(rollup.state)?.toUpperCase();
+  if (state === "PENDING" || state === "EXPECTED") return "pending";
+  if (
+    ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"].includes(
+      state ?? "",
+    )
+  )
+    return "failure";
+  if (state === "SUCCESS") return "success";
+  const contexts = asRecord(rollup.contexts);
+  return summarizeChecks(contexts?.nodes);
+}
+
+function checkDetailsFrom(value: unknown): PullRequestResource["checkDetails"] {
+  const records = Array.isArray(value) ? value : asRecord(value)?.nodes;
+  if (!Array.isArray(records)) return [];
+  return records
+    .flatMap((item) => {
+      const record = asRecord(item);
+      if (!record) return [];
+      const name =
+        asString(record.name) ?? asString(record.context) ?? "Unnamed check";
+      const status = asString(record.status)?.toUpperCase();
+      const conclusion = asString(record.conclusion)?.toUpperCase();
+      const normalized: PullRequestResource["checkDetails"][number]["status"] =
+        conclusion === "FAILURE" ||
+        conclusion === "ERROR" ||
+        conclusion === "CANCELLED" ||
+        conclusion === "TIMED_OUT" ||
+        conclusion === "ACTION_REQUIRED" ||
+        [
+          "FAILURE",
+          "ERROR",
+          "CANCELLED",
+          "TIMED_OUT",
+          "ACTION_REQUIRED",
+        ].includes(status ?? "")
+          ? "failure"
+          : ["IN_PROGRESS", "PENDING", "QUEUED", "EXPECTED"].includes(
+                status ?? "",
+              )
+            ? "pending"
+            : conclusion === "SUCCESS" || status === "SUCCESS"
+              ? "success"
+              : "unknown";
+      return [{ name, status: normalized }];
+    })
+    .sort((left, right) => {
+      const rank = (status: string) =>
+        status === "failure" ? 0 : status === "pending" ? 1 : 2;
+      return (
+        rank(left.status) - rank(right.status) ||
+        left.name.localeCompare(right.name)
+      );
+    });
+}
+
+function makePullRequest(
+  record: Record<string, unknown>,
+  flags: { isMine: boolean; reviewRequestedFromMe: boolean },
+): PullRequestResource | null {
+  const repository = asString(asRecord(record.repository)?.nameWithOwner);
+  const number = asNumber(record.number);
+  const url = asString(record.url);
+  if (!repository || !number || !url) return null;
+  return {
+    key: resourceKey("pull-request", repository, number),
+    kind: "pull-request",
+    repository,
+    number,
+    title: asString(record.title) ?? `Pull request #${number}`,
+    url,
+    authorLogin: loginFrom(record.author),
+    assigneeLogins: stringsFromNodes(record.assignees, "login"),
+    labels: labelsFrom(record.labels),
+    createdAt: asString(record.createdAt) ?? new Date(0).toISOString(),
+    updatedAt: asString(record.updatedAt) ?? new Date(0).toISOString(),
+    commentCount: asNumber(asRecord(record.comments)?.totalCount) ?? 0,
+    isMine: flags.isMine,
+    isAssignedToMe: false,
+    workspaceIds: [],
+    workspaceNames: [],
+    agents: [],
+    isDraft: record.isDraft === true,
+    headRefName: asString(record.headRefName),
+    checkDetails: checkDetailsFrom(record.statusCheckRollup),
+    baseRefName: asString(record.baseRefName),
+    checksStatus: record.statusCheckRollup
+      ? checkStatusFromGraphql(record.statusCheckRollup)
+      : summarizeChecks(record.statusCheckRollup),
+    reviewDecision: (["approved", "changes_requested", "pending"].includes(
+      String(record.reviewDecision).toLowerCase(),
+    )
+      ? String(record.reviewDecision).toLowerCase()
+      : "unknown") as PullRequestResource["reviewDecision"],
+    mergeable: (["MERGEABLE", "CONFLICTING", "UNKNOWN"].includes(
+      String(record.mergeable).toUpperCase(),
+    )
+      ? String(record.mergeable).toUpperCase()
+      : "UNKNOWN") as PullRequestResource["mergeable"],
+    reviewRequestedFromMe: flags.reviewRequestedFromMe,
+  };
+}
+
+function makeIssue(
+  record: Record<string, unknown>,
+  flags: { isMine: boolean; isAssignedToMe: boolean },
+): IssueResource | null {
+  const repository = asString(asRecord(record.repository)?.nameWithOwner);
+  const number = asNumber(record.number);
+  const url = asString(record.url);
+  if (!repository || !number || !url) return null;
+  return {
+    key: resourceKey("issue", repository, number),
+    kind: "issue",
+    repository,
+    number,
+    title: asString(record.title) ?? `Issue #${number}`,
+    url,
+    authorLogin: loginFrom(record.author),
+    assigneeLogins: stringsFromNodes(record.assignees, "login"),
+    labels: labelsFrom(record.labels),
+    createdAt: asString(record.createdAt) ?? new Date(0).toISOString(),
+    updatedAt: asString(record.updatedAt) ?? new Date(0).toISOString(),
+    isMine: flags.isMine,
+    isAssignedToMe: flags.isAssignedToMe,
+    workspaceIds: [],
+    workspaceNames: [],
+    agents: [],
+    milestoneTitle: asString(asRecord(record.milestone)?.title),
+    commentCount: asNumber(asRecord(record.comments)?.totalCount) ?? 0,
+  };
+}
+
+function mergeResources(resources: GitHubResource[]): GitHubResource[] {
+  const merged = new Map<string, GitHubResource>();
+  for (const resource of resources) {
+    const existing = merged.get(resource.key);
+    if (!existing) {
+      merged.set(resource.key, resource);
+      continue;
+    }
+    if (resource.kind === "pull-request" && existing.kind === "pull-request") {
+      merged.set(resource.key, {
+        ...existing,
+        ...resource,
+        isMine: existing.isMine || resource.isMine,
+        reviewRequestedFromMe:
+          existing.reviewRequestedFromMe || resource.reviewRequestedFromMe,
+      });
+    } else if (resource.kind === "issue" && existing.kind === "issue") {
+      merged.set(resource.key, {
+        ...existing,
+        ...resource,
+        isMine: existing.isMine || resource.isMine,
+        isAssignedToMe: existing.isAssignedToMe || resource.isAssignedToMe,
+      });
+    }
+  }
+  return [...merged.values()];
+}
+
+export function createGitHubResourceIntake(
+  run: GitHubCommandRunner = defaultCommandRunner,
+): GitHubResourceIntake {
+  const cache = new Map<string, { value: CacheValue; expiresAt: number }>();
+  const inFlight = new Map<string, Promise<CacheValue>>();
+  const viewerLogins = new Map<string, { value: string; expiresAt: number }>();
+  const viewerInFlight = new Map<string, Promise<string>>();
+  let diagnosticsCache: { value: DiagnosticsValue; expiresAt: number } | null =
+    null;
+  let diagnosticsInFlight: Promise<DiagnosticsValue> | null = null;
+
+  async function getViewerLogin(): Promise<string> {
+    const cached = viewerLogins.get("github.com");
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const running = viewerInFlight.get("github.com");
+    if (running) return running;
+    const request = (async () => {
+      try {
+        const { stdout } = await run(["api", "user", "--jq", ".login"]);
+        const login = stdout.trim();
+        if (!login)
+          throw new Error("GitHub CLI returned no authenticated login.");
+        viewerLogins.set("github.com", {
+          value: login,
+          expiresAt: Date.now() + CACHE_TTL_MS,
+        });
+        return login;
+      } finally {
+        viewerInFlight.delete("github.com");
+      }
+    })();
+    viewerInFlight.set("github.com", request);
+    return request;
+  }
+
+  async function repositoryResources(
+    repository: string,
+  ): Promise<GitHubResource[]> {
+    const [pullRequests, issues] = await Promise.all([
+      run([
+        "pr",
+        "list",
+        "--repo",
+        repository,
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        pullRequestJsonFields,
+      ]),
+      run([
+        "issue",
+        "list",
+        "--repo",
+        repository,
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        issueJsonFields,
+      ]),
+    ]);
+    const parse = (text: string) => {
+      const value: unknown = JSON.parse(text);
+      return Array.isArray(value)
+        ? value.flatMap((item) => {
+            const itemRecord = asRecord(item);
+            return itemRecord ? [itemRecord] : [];
+          })
+        : [];
+    };
+    const decorateRepository = (record: Record<string, unknown>) => ({
+      ...record,
+      repository: { nameWithOwner: repository },
+    });
+    return mergeResources([
+      ...parse(pullRequests.stdout).flatMap((record) => {
+        const item = makePullRequest(decorateRepository(record), {
+          isMine: false,
+          reviewRequestedFromMe: false,
+        });
+        return item ? [item] : [];
+      }),
+      ...parse(issues.stdout).flatMap((record) => {
+        const item = makeIssue(decorateRepository(record), {
+          isMine: false,
+          isAssignedToMe: false,
+        });
+        return item ? [item] : [];
+      }),
+    ]);
+  }
+
+  async function accountResources(): Promise<GitHubResource[]> {
+    const viewer = await getViewerLogin();
+    const { stdout } = await run([
+      "api",
+      "graphql",
+      "-f",
+      `query=${accountQuery}`,
+      "-f",
+      `authoredPr=is:pr is:open author:${viewer}`,
+      "-f",
+      `reviewPr=is:pr is:open review-requested:${viewer}`,
+      "-f",
+      `authoredIssue=is:issue is:open author:${viewer}`,
+      "-f",
+      `assignedIssue=is:issue is:open assignee:${viewer}`,
+    ]);
+    const root = asRecord(asRecord(JSON.parse(stdout))?.data);
+    const nodes = (name: string) => {
+      const connection = asRecord(root?.[name]);
+      return Array.isArray(connection?.nodes)
+        ? connection.nodes.flatMap((item) => {
+            const record = asRecord(item);
+            return record ? [record] : [];
+          })
+        : [];
+    };
+    return mergeResources([
+      ...nodes("authoredPr").flatMap((record) => {
+        const item = makePullRequest(record, {
+          isMine: true,
+          reviewRequestedFromMe: false,
+        });
+        return item ? [item] : [];
+      }),
+      ...nodes("reviewPr").flatMap((record) => {
+        const item = makePullRequest(record, {
+          isMine: false,
+          reviewRequestedFromMe: true,
+        });
+        return item ? [item] : [];
+      }),
+      ...nodes("authoredIssue").flatMap((record) => {
+        const item = makeIssue(record, { isMine: true, isAssignedToMe: false });
+        return item ? [item] : [];
+      }),
+      ...nodes("assignedIssue").flatMap((record) => {
+        const item = makeIssue(record, { isMine: false, isAssignedToMe: true });
+        return item ? [item] : [];
+      }),
+    ]);
+  }
+
+  async function listResources(
+    input: z.infer<typeof listResourcesRpc.input>,
+  ): Promise<CacheValue> {
+    const repository = input.repository?.toLowerCase();
+    const key = `${input.scope}:${repository ?? "account"}`;
+    const cached = cache.get(key);
+    if (!input.forceRefresh && cached && cached.expiresAt > Date.now())
+      return cached.value;
+    const running = inFlight.get(key);
+    if (running) return running;
+    const request = (async () => {
+      try {
+        const resources =
+          input.scope === "account"
+            ? await accountResources()
+            : repository
+              ? await repositoryResources(repository)
+              : [];
+        const value = {
+          resources,
+          refreshedAt: new Date().toISOString(),
+          warnings: [],
+        };
+        cache.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
+        return value;
+      } catch (error) {
+        return {
+          resources: [],
+          refreshedAt: new Date().toISOString(),
+          warnings: [errorWarning(error)],
+        };
+      } finally {
+        inFlight.delete(key);
+      }
+    })();
+    inFlight.set(key, request);
+    return request;
+  }
+
+  async function refreshResource(
+    input: z.infer<typeof refreshResourceRpc.input>,
+  ): Promise<z.infer<typeof refreshResourceRpc.output>> {
+    const command = input.kind === "pull-request" ? "pr" : "issue";
+    const fields =
+      input.kind === "pull-request" ? pullRequestJsonFields : issueJsonFields;
+    try {
+      const { stdout } = await run([
+        command,
+        "view",
+        String(input.number),
+        "--repo",
+        input.repository,
+        "--json",
+        fields,
+      ]);
+      const record = asRecord(JSON.parse(stdout));
+      if (!record)
+        throw new Error("GitHub returned an invalid resource payload.");
+      const decorated = {
+        ...record,
+        repository: { nameWithOwner: input.repository },
+      };
+      const resource =
+        input.kind === "pull-request"
+          ? makePullRequest(decorated, {
+              isMine: false,
+              reviewRequestedFromMe: false,
+            })
+          : makeIssue(decorated, { isMine: false, isAssignedToMe: false });
+      if (!resource)
+        throw new Error("GitHub returned an incomplete resource payload.");
+      return { resource };
+    } catch (error) {
+      throw new Error(errorWarning(error).message);
+    }
+  }
+
+  async function diagnostics(
+    input: z.infer<typeof diagnosticsRpc.input>,
+  ): Promise<DiagnosticsValue> {
+    if (
+      !input.forceRefresh &&
+      diagnosticsCache &&
+      diagnosticsCache.expiresAt > Date.now()
+    )
+      return diagnosticsCache.value;
+    if (!input.forceRefresh && diagnosticsInFlight) return diagnosticsInFlight;
+    diagnosticsInFlight = (async () => {
+      try {
+        const [{ stdout: user }, { stdout: rate }] = await Promise.all([
+          run(["api", "user", "--jq", ".login"]),
+          run(["api", "rate_limit", "--jq", ".resources.core"]),
+        ]);
+        const parsed = asRecord(JSON.parse(rate));
+        const reset = asNumber(parsed?.reset);
+        const value: DiagnosticsValue = {
+          viewerLogin: user.trim() || null,
+          remaining: asNumber(parsed?.remaining),
+          limit: asNumber(parsed?.limit),
+          resetAt: reset === null ? null : new Date(reset * 1000).toISOString(),
+          status: "ok",
+          message: null,
+        };
+        diagnosticsCache = { value, expiresAt: Date.now() + CACHE_TTL_MS };
+        return value;
+      } catch (error) {
+        const warning = errorWarning(error);
+        const status =
+          warning.code === "gh-not-authenticated"
+            ? "auth-required"
+            : warning.code === "github-rate-limited"
+              ? "rate-limited"
+              : "unavailable";
+        return {
+          viewerLogin: null,
+          remaining: null,
+          limit: null,
+          resetAt: null,
+          status,
+          message: warning.message,
+        };
+      } finally {
+        diagnosticsInFlight = null;
+      }
+    })();
+    return diagnosticsInFlight;
+  }
+
+  return {
+    listResources,
+    refreshResource,
+    diagnostics,
+  };
+}
