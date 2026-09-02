@@ -3,7 +3,11 @@ import type {
   IssueResource,
   PullRequestResource,
 } from "./github-workbench.shared";
-import { createResourceIndex } from "./resource-index.shared";
+import {
+  applyAgentUpdate,
+  applyWorkspaceUpdate,
+  createResourceIndex,
+} from "./resource-index.shared";
 
 describe("ResourceIndex", () => {
   const pr1: PullRequestResource = {
@@ -360,5 +364,84 @@ describe("ResourceIndex", () => {
     });
     expect(missing.items).toHaveLength(0);
     expect(missing.summary.total).toBe(0);
+  });
+
+  it("patches directory snapshots from Paseo updates without a full refetch", () => {
+    const snapshot = {
+      workspaces: [
+        {
+          id: "ws-1",
+          projectId: "project-1",
+          projectDisplayName: "Paseo",
+          name: "Fix parser",
+          archivingAt: null,
+          remoteUrl: "git@github.com:getpaseo/paseo.git",
+          pullRequestNumber: 10,
+          worktreeSlug: "pr-10",
+          activityAt: "2026-02-03T00:00:00Z",
+        },
+      ],
+      agents: [
+        {
+          id: "agent-1",
+          workspaceId: "ws-1",
+          title: "Reviewer",
+          status: "idle" as const,
+          requiresAttention: false,
+          attentionReason: null,
+          pendingPermissions: 0,
+          updatedAt: "2026-02-03T00:00:00Z",
+          labels: {},
+        },
+      ],
+    };
+
+    const workspaceUpsert = {
+      kind: "upsert",
+      workspace: {
+        id: "ws-1",
+        projectId: "project-1",
+        projectDisplayName: "Paseo",
+        name: "Fix parser (updated)",
+        archivingAt: null,
+        gitRuntime: { remoteUrl: "https://github.com/getpaseo/paseo" },
+        githubRuntime: { pullRequest: { number: 10 } },
+        worktreeSlug: "pr-10",
+        activityAt: "2026-02-04T00:00:00Z",
+      },
+    } as unknown as Parameters<typeof applyWorkspaceUpdate>[1];
+    const agentUpsert = {
+      kind: "upsert",
+      agent: {
+        id: "agent-1",
+        workspaceId: "ws-1",
+        title: "Reviewer (updated)",
+        status: "running",
+        requiresAttention: true,
+        attentionReason: "permission",
+        pendingPermissions: [{ id: "permission-1" }],
+        updatedAt: "2026-02-04T00:00:00Z",
+        labels: { role: "reviewer" },
+      },
+    } as unknown as Parameters<typeof applyAgentUpdate>[1];
+
+    const updated = applyAgentUpdate(
+      applyWorkspaceUpdate(snapshot, workspaceUpsert),
+      agentUpsert,
+    );
+    expect(updated.workspaces).toHaveLength(1);
+    expect(updated.workspaces[0]?.name).toBe("Fix parser (updated)");
+    expect(updated.workspaces[0]?.remoteUrl).toBe(
+      "https://github.com/getpaseo/paseo",
+    );
+    expect(updated.agents[0]?.title).toBe("Reviewer (updated)");
+    expect(updated.agents[0]?.pendingPermissions).toBe(1);
+
+    const removed = applyAgentUpdate(
+      applyWorkspaceUpdate(updated, { kind: "remove", id: "ws-1" }),
+      { kind: "remove", agentId: "agent-1" },
+    );
+    expect(removed.workspaces).toHaveLength(0);
+    expect(removed.agents).toHaveLength(0);
   });
 });

@@ -1,4 +1,10 @@
 import type {
+  PaseoAgent,
+  PaseoAgentUpdate,
+  PaseoWorkspace,
+  PaseoWorkspaceUpdate,
+} from "@getpaseo/client";
+import type {
   AgentSummary,
   GitHubResource,
   IssueResource,
@@ -40,6 +46,80 @@ export type PaseoDirectorySnapshot = {
   workspaces: WorkspaceSnapshot[];
   agents: AgentSnapshot[];
 };
+
+export function toWorkspaceSnapshot(
+  workspace: PaseoWorkspace,
+): WorkspaceSnapshot {
+  return {
+    id: workspace.id,
+    projectId: workspace.projectId,
+    projectDisplayName: workspace.projectDisplayName,
+    name: workspace.name,
+    archivingAt: workspace.archivingAt,
+    remoteUrl: workspace.gitRuntime?.remoteUrl ?? null,
+    pullRequestNumber: workspace.githubRuntime?.pullRequest?.number,
+    worktreeSlug: workspace.worktreeSlug,
+    activityAt: workspace.activityAt,
+  };
+}
+
+export function toAgentSnapshot(agent: PaseoAgent): AgentSnapshot {
+  return {
+    id: agent.id,
+    workspaceId: agent.workspaceId,
+    title: agent.title,
+    status: agent.status,
+    requiresAttention: agent.requiresAttention ?? false,
+    attentionReason: agent.attentionReason ?? null,
+    pendingPermissions: agent.pendingPermissions.length,
+    updatedAt: agent.updatedAt,
+    labels: agent.labels,
+  };
+}
+
+export function applyWorkspaceUpdate(
+  snapshot: PaseoDirectorySnapshot,
+  update: PaseoWorkspaceUpdate,
+): PaseoDirectorySnapshot {
+  if (update.kind === "remove") {
+    return {
+      ...snapshot,
+      workspaces: snapshot.workspaces.filter(
+        (workspace) => workspace.id !== update.id,
+      ),
+    };
+  }
+  const workspace = toWorkspaceSnapshot(update.workspace);
+  const index = snapshot.workspaces.findIndex(
+    (entry) => entry.id === workspace.id,
+  );
+  if (index < 0) {
+    return { ...snapshot, workspaces: [...snapshot.workspaces, workspace] };
+  }
+  const workspaces = snapshot.workspaces.slice();
+  workspaces[index] = workspace;
+  return { ...snapshot, workspaces };
+}
+
+export function applyAgentUpdate(
+  snapshot: PaseoDirectorySnapshot,
+  update: PaseoAgentUpdate,
+): PaseoDirectorySnapshot {
+  if (update.kind === "remove") {
+    return {
+      ...snapshot,
+      agents: snapshot.agents.filter((agent) => agent.id !== update.agentId),
+    };
+  }
+  const agent = toAgentSnapshot(update.agent);
+  const index = snapshot.agents.findIndex((entry) => entry.id === agent.id);
+  if (index < 0) {
+    return { ...snapshot, agents: [...snapshot.agents, agent] };
+  }
+  const agents = snapshot.agents.slice();
+  agents[index] = agent;
+  return { ...snapshot, agents };
+}
 
 export type ResourceClassification = {
   bucket:

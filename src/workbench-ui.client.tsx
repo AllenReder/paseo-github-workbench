@@ -28,9 +28,13 @@ import {
 } from "./github-workbench.shared";
 import { useTranslation } from "./i18n/context";
 import {
+  applyAgentUpdate,
+  applyWorkspaceUpdate,
   createResourceIndex,
   type PaseoDirectorySnapshot,
   type ResourceClassification,
+  toAgentSnapshot,
+  toWorkspaceSnapshot,
   type WorkspaceSnapshot,
 } from "./resource-index.shared";
 
@@ -50,6 +54,7 @@ type ResourceDetailQueryData = {
 const WORKBENCH_STALE_TIME_MS = 5 * 60_000;
 const STABLE_WORKBENCH_STALE_TIME_MS = 30 * 60_000;
 const RESOURCE_DETAIL_STALE_TIME_MS = 10 * 60_000;
+const DIRECTORY_RECONCILE_INTERVAL_MS = 15 * 60_000;
 
 function resourceDetailQueryKey(hostId: string, resourceKey: string | null) {
   return ["github-workbench", hostId, "resource-detail", resourceKey] as const;
@@ -78,7 +83,15 @@ function usePaseoDirectory(hostId: string) {
   const paseo = usePaseo();
   const queryClient = useQueryClient();
   const queryKey = useMemo(
-    () => ["github-workbench", hostId, "directory"],
+    () => ["github-workbench", hostId, "directory"] as const,
+    [hostId],
+  );
+  const workspaceSubscriptionId = useMemo(
+    () => `github-workbench:${hostId}:workspaces`,
+    [hostId],
+  );
+  const agentSubscriptionId = useMemo(
+    () => `github-workbench:${hostId}:agents`,
     [hostId],
   );
   const query = useQuery({
@@ -90,24 +103,15 @@ function usePaseoDirectory(hostId: string) {
         let cursor: string | undefined;
         for (let page = 0; page < 10; page += 1) {
           const response = await paseo.workspaces.list({
+            ...(!cursor
+              ? { subscribe: { subscriptionId: workspaceSubscriptionId } }
+              : {}),
             page: {
               limit: 200,
               ...(cursor ? { cursor } : {}),
             },
           });
-          workspaces.push(
-            ...response.entries.map((workspace) => ({
-              id: workspace.id,
-              projectId: workspace.projectId,
-              projectDisplayName: workspace.projectDisplayName,
-              name: workspace.name,
-              archivingAt: workspace.archivingAt,
-              remoteUrl: workspace.gitRuntime?.remoteUrl ?? null,
-              pullRequestNumber: workspace.githubRuntime?.pullRequest?.number,
-              worktreeSlug: workspace.worktreeSlug,
-              activityAt: workspace.activityAt,
-            })),
-          );
+          workspaces.push(...response.entries.map(toWorkspaceSnapshot));
           cursor = response.pageInfo.nextCursor ?? undefined;
           if (!cursor) break;
         }
@@ -118,20 +122,13 @@ function usePaseoDirectory(hostId: string) {
         let cursor: string | undefined;
         for (let page = 0; page < 10; page += 1) {
           const response = await paseo.agents.list({
+            ...(!cursor
+              ? { subscribe: { subscriptionId: agentSubscriptionId } }
+              : {}),
             page: { limit: 200, ...(cursor ? { cursor } : {}) },
           });
           agents.push(
-            ...response.entries.map(({ agent }) => ({
-              id: agent.id,
-              workspaceId: agent.workspaceId,
-              title: agent.title,
-              status: agent.status,
-              requiresAttention: agent.requiresAttention ?? false,
-              attentionReason: agent.attentionReason ?? null,
-              pendingPermissions: agent.pendingPermissions.length,
-              updatedAt: agent.updatedAt,
-              labels: agent.labels,
-            })),
+            ...response.entries.map(({ agent }) => toAgentSnapshot(agent)),
           );
           cursor = response.pageInfo.nextCursor ?? undefined;
           if (!cursor) break;
@@ -146,20 +143,23 @@ function usePaseoDirectory(hostId: string) {
     },
   });
   useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const invalidate = () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(
-        () => queryClient.invalidateQueries({ queryKey }),
-        500,
+    const stopWorkspaces = paseo.workspaces.subscribe((update) => {
+      queryClient.setQueryData<PaseoDirectorySnapshot>(queryKey, (snapshot) =>
+        snapshot ? applyWorkspaceUpdate(snapshot, update) : snapshot,
       );
-    };
-    const stopWorkspaces = paseo.workspaces.subscribe(invalidate);
-    const stopAgents = paseo.agents.subscribe(invalidate);
+    });
+    const stopAgents = paseo.agents.subscribe((update) => {
+      queryClient.setQueryData<PaseoDirectorySnapshot>(queryKey, (snapshot) =>
+        snapshot ? applyAgentUpdate(snapshot, update) : snapshot,
+      );
+    });
+    const reconcile = setInterval(() => {
+      queryClient.invalidateQueries({ queryKey, refetchType: "active" });
+    }, DIRECTORY_RECONCILE_INTERVAL_MS);
     return () => {
-      if (timer) clearTimeout(timer);
       stopWorkspaces();
       stopAgents();
+      clearInterval(reconcile);
     };
   }, [paseo, queryClient, queryKey]);
   return query;
