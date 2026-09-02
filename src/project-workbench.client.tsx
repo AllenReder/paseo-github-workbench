@@ -25,19 +25,7 @@ function ProjectGitHubWorkbenchPanelInner(props: PluginWorkspacePanelProps) {
     ],
     enabled: Boolean(props.workspaceId),
     staleTime: 4 * 60_000,
-    queryFn: async () => {
-      const response = await paseo.workspaces.list({
-        filter: { idPrefix: props.workspaceId },
-        page: { limit: 20 },
-      });
-      const match = response.entries.find(
-        (workspace) => workspace.id === props.workspaceId,
-      );
-      // Older daemons accept idPrefix as a compatibility field but may not
-      // apply it server-side. Preserve correctness with the legacy scan when
-      // the fast path does not return an exact workspace.
-      return match ?? paseo.workspaces.ref(props.workspaceId).refresh();
-    },
+    queryFn: () => paseo.workspaces.ref(props.workspaceId).refresh(),
   });
   // The plugin workspace snapshot intentionally omits git runtime details, so
   // refresh only this workspace for its remote. This runs in parallel with the
