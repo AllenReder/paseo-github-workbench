@@ -7,13 +7,9 @@ Security fixes are applied to the latest version on the main branch.
 ## Reporting a vulnerability
 
 Please do not disclose vulnerabilities, credentials, private repository
-contents, or local filesystem paths in a public issue. Use GitHub's private
-vulnerability-reporting flow for this repository when available:
-
-https://github.com/AllenReder/paseo-github-workbench/security/advisories/new
-
-If that flow is unavailable, contact the repository maintainer through GitHub
-before publishing details.
+contents, or local filesystem paths in a public issue. A private reporting
+channel is not currently available; contact the repository maintainer before
+publishing sensitive details.
 
 ## Trust boundary
 
