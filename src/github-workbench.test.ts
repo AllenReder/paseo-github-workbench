@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   adjustPendingResourceCount,
+  isGitHubResourceDetailStale,
   issueBranchSlug,
   mergeDetailedResource,
   mergeRefreshedResource,
@@ -209,6 +210,19 @@ describe("GitHub workbench shared primitives", () => {
     if (merged.kind === "pull-request") {
       expect(merged.checkDetails).toEqual([{ name: "CI", status: "success" }]);
     }
+  });
+
+  test("treats a changed pull request checks status as stale detail", () => {
+    const summary = pullRequest({
+      updatedAt: "2026-02-01T00:00:00Z",
+      checksStatus: "success",
+    });
+    const detail = pullRequest({
+      updatedAt: "2026-02-01T00:00:00Z",
+      checksStatus: "pending",
+    });
+
+    expect(isGitHubResourceDetailStale(summary, detail)).toBe(true);
   });
 
   test("formats accessibility labels properly", () => {

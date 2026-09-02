@@ -16,6 +16,7 @@ import {
   adjustPendingResourceCount,
   ensureResourceWorkspaceRpc,
   type GitHubResource,
+  isGitHubResourceDetailStale,
   type LifecycleState,
   listResourcesRpc,
   mergeDetailedResource,
@@ -1166,9 +1167,12 @@ export function Workbench({
   const detailResource = selectedDetailQuery.data?.resource;
   const selectedResourceKey = selected?.key ?? null;
   const selectedUpdatedAt = selected?.updatedAt ?? null;
-  const detailUpdatedAt = detailResource?.updatedAt ?? null;
+  const selectedChecksStatus =
+    selected?.kind === "pull-request" ? selected.checksStatus : null;
   const detailIsBehindSummary = Boolean(
-    selectedUpdatedAt && detailUpdatedAt && detailUpdatedAt < selectedUpdatedAt,
+    selected &&
+      detailResource &&
+      isGitHubResourceDetailStale(selected, detailResource),
   );
   const selectedForDetail =
     selected && detailResource && !detailIsBehindSummary
@@ -1176,7 +1180,7 @@ export function Workbench({
       : selected;
   const staleDetailVersion =
     detailIsBehindSummary && selectedResourceKey && selectedUpdatedAt
-      ? `${selectedResourceKey}:${selectedUpdatedAt}`
+      ? `${selectedResourceKey}:${selectedUpdatedAt}:${selectedChecksStatus ?? ""}`
       : null;
   useEffect(() => {
     if (!selectedResourceKey || !staleDetailVersion) return;

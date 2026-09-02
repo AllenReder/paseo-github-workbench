@@ -318,6 +318,17 @@ export function mergeDetailedResource(
   return { ...summary, body: detail.body };
 }
 
+export function isGitHubResourceDetailStale(
+  summary: GitHubResource,
+  detail: GitHubResource,
+): boolean {
+  if (summary.key !== detail.key || summary.kind !== detail.kind) return true;
+  if (detail.updatedAt < summary.updatedAt) return true;
+  return summary.kind === "pull-request" && detail.kind === "pull-request"
+    ? detail.checksStatus !== summary.checksStatus
+    : false;
+}
+
 export function issueBranchSlug(number: number, title: string): string {
   const slug =
     title
