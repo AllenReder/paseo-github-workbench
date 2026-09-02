@@ -48,6 +48,7 @@ const execFile = promisify(execFileCallback);
 // Keep this slightly shorter than the five-minute client poll interval so a
 // scheduled refetch always reaches GitHub rather than extending stale data.
 const CACHE_TTL_MS = 4 * 60_000;
+const STALE_CACHE_GRACE_MS = 60 * 60_000;
 const GH_COMMAND_TIMEOUT_MS = 60_000;
 const GH_COMMAND_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 const MAX_CHECK_DETAILS_PER_PULL_REQUEST = 20;
@@ -500,7 +501,10 @@ export function createGitHubResourceIntake(
   run: GitHubCommandRunner = defaultCommandRunner,
   options: GitHubResourceIntakeOptions = {},
 ): GitHubResourceIntake {
-  const cache = new Map<string, { value: CacheValue; expiresAt: number }>();
+  const cache = new Map<
+    string,
+    { value: CacheValue; expiresAt: number; staleUntil: number }
+  >();
   const inFlight = new Map<string, Promise<CacheValue>>();
   const viewerLogins = new Map<string, { value: string; expiresAt: number }>();
   const viewerInFlight = new Map<string, Promise<string>>();
@@ -746,9 +750,21 @@ export function createGitHubResourceIntake(
           refreshedAt: new Date().toISOString(),
           warnings: loaded.warnings,
         };
-        cache.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
+        const now = Date.now();
+        cache.set(key, {
+          value,
+          expiresAt: now + CACHE_TTL_MS,
+          staleUntil: now + CACHE_TTL_MS + STALE_CACHE_GRACE_MS,
+        });
         return value;
       } catch (error) {
+        const stale = cache.get(key);
+        if (stale && stale.staleUntil > Date.now()) {
+          return {
+            ...stale.value,
+            warnings: [...stale.value.warnings, errorWarning(error)],
+          };
+        }
         return {
           resources: [],
           refreshedAt: new Date().toISOString(),

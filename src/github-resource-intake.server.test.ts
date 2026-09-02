@@ -176,6 +176,56 @@ describe("GitHubResourceIntake", () => {
     expect(calls).toBe(2);
   });
 
+  it("serves the last good repository result when a forced refresh fails", async () => {
+    let calls = 0;
+    const intake = createGitHubResourceIntake(async () => {
+      calls += 1;
+      if (calls > 1) throw new Error("HTTP 503: Service Unavailable");
+      return {
+        stdout: JSON.stringify({
+          data: {
+            repository: {
+              pullRequests: { nodes: [] },
+              issues: {
+                nodes: [
+                  {
+                    number: 7,
+                    title: "Cached issue",
+                    url: "https://github.com/owner/repo/issues/7",
+                    state: "OPEN",
+                    repository: { nameWithOwner: "owner/repo" },
+                    author: { login: "dev" },
+                    assignees: { nodes: [] },
+                    labels: { nodes: [] },
+                    createdAt: "2026-01-01T00:00:00Z",
+                    updatedAt: "2026-01-02T00:00:00Z",
+                    comments: { totalCount: 0 },
+                    milestone: null,
+                  },
+                ],
+              },
+            },
+          },
+        }),
+        stderr: "",
+      };
+    });
+
+    const first = await intake.listResources({
+      scope: "repository",
+      repository: "owner/repo",
+    });
+    const stale = await intake.listResources({
+      scope: "repository",
+      repository: "owner/repo",
+      forceRefresh: true,
+    });
+
+    expect(first.resources[0].title).toBe("Cached issue");
+    expect(stale.resources[0].title).toBe("Cached issue");
+    expect(stale.warnings.at(-1)?.code).toBe("github-query-failed");
+  });
+
   it("handles account scope, resolves viewer, and merges relationship flags", async () => {
     const intake = createGitHubResourceIntake(async (args) => {
       if (args[0] === "api" && args[1] === "graphql") {
