@@ -3,7 +3,8 @@ import {
   usePaseo,
   useWorkspace,
 } from "@getpaseo/plugin";
-import { useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { normalizeGitHubRepository } from "./github-workbench.shared";
 import { I18nProvider, useTranslation } from "./i18n/context";
@@ -15,15 +16,22 @@ function ProjectGitHubWorkbenchPanelInner(props: PluginWorkspacePanelProps) {
   const workspace = useWorkspace(props.workspaceId, (item) => ({
     projectId: item.projectId,
   }));
-  const workspaceHandle = useMemo(
-    () => paseo.workspaces.ref(props.workspaceId),
-    [paseo, props.workspaceId],
-  );
-  // The plugin workspace snapshot intentionally omits git runtime details, but
-  // the client handle keeps the full descriptor locally after the workspace is
-  // opened. Use it as an immediate seed while the project-wide query loads.
+  const currentWorkspaceQuery = useQuery({
+    queryKey: [
+      "github-workbench",
+      props.host.id,
+      "current-workspace",
+      props.workspaceId,
+    ],
+    enabled: Boolean(props.workspaceId),
+    staleTime: 4 * 60_000,
+    queryFn: () => paseo.workspaces.ref(props.workspaceId).refresh(),
+  });
+  // The plugin workspace snapshot intentionally omits git runtime details, so
+  // refresh only this workspace for its remote. This runs in parallel with the
+  // project-wide repository query and avoids waiting for a global scan.
   const currentRepository = normalizeGitHubRepository(
-    workspaceHandle.current()?.gitRuntime?.remoteUrl,
+    currentWorkspaceQuery.data?.gitRuntime?.remoteUrl,
   );
   const repositories = useProjectRepositories(
     workspace?.projectId ?? null,
