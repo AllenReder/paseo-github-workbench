@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a focused improvement to GitHub Workbench.
+title: "Feature: "
+labels:
+  - enhancement
+  - needs-triage
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow
+      description: What are you trying to accomplish, and how do you do it today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful improvement.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or other approaches did you consider?

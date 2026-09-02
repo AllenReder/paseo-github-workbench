@@ -2,7 +2,27 @@
   "name": "paseo-github-workbench",
   "private": true,
   "version": "0.1.0",
+  "description": "A GitHub issue and pull request workbench plugin for Paseo.",
   "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AllenReder/paseo-github-workbench.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AllenReder/paseo-github-workbench/issues"
+  },
+  "homepage": "https://github.com/AllenReder/paseo-github-workbench#readme",
+  "keywords": [
+    "paseo",
+    "paseo-plugin",
+    "github",
+    "pull-requests",
+    "issues"
+  ],
+  "engines": {
+    "bun": ">=1.3"
+  },
   "scripts": {
     "check": "biome check .",
     "check:write": "biome check --write .",
