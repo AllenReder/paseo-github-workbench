@@ -383,13 +383,19 @@ describe("GitHubResourceIntake", () => {
                   updatedAt: "2026-02-05T00:00:00Z",
                   createdAt: "2026-02-01T00:00:00Z",
                   reviewDecision: "CHANGES_REQUESTED",
-                  statusCheckRollup: [
-                    {
-                      name: "build",
-                      status: "COMPLETED",
-                      conclusion: "FAILURE",
+                  statusCheckRollup: {
+                    state: "FAILURE",
+                    contexts: {
+                      nodes: [
+                        {
+                          name: "build",
+                          status: "COMPLETED",
+                          conclusion: "FAILURE",
+                        },
+                        { context: "legacy", state: "PENDING" },
+                      ],
                     },
-                  ],
+                  },
                   mergeable: "CONFLICTING",
                   comments: 5,
                 },
@@ -416,6 +422,7 @@ describe("GitHubResourceIntake", () => {
       expect(result.resource.checksStatus).toBe("failure");
       expect(result.resource.checkDetails).toEqual([
         { name: "build", status: "failure" },
+        { name: "legacy", status: "pending" },
       ]);
     }
   });

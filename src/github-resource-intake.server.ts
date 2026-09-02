@@ -273,7 +273,9 @@ function checkDetailsFrom(value: unknown): PullRequestResource["checkDetails"] {
       if (!record) return [];
       const name =
         asString(record.name) ?? asString(record.context) ?? "Unnamed check";
-      const status = asString(record.status)?.toUpperCase();
+      const status =
+        asString(record.status)?.toUpperCase() ??
+        asString(record.state)?.toUpperCase();
       const conclusion = asString(record.conclusion)?.toUpperCase();
       const normalized: PullRequestResource["checkDetails"][number]["status"] =
         conclusion === "FAILURE" ||
@@ -289,9 +291,14 @@ function checkDetailsFrom(value: unknown): PullRequestResource["checkDetails"] {
           "ACTION_REQUIRED",
         ].includes(status ?? "")
           ? "failure"
-          : ["IN_PROGRESS", "PENDING", "QUEUED", "EXPECTED"].includes(
-                status ?? "",
-              )
+          : [
+                "IN_PROGRESS",
+                "PENDING",
+                "QUEUED",
+                "EXPECTED",
+                "REQUESTED",
+                "WAITING",
+              ].includes(status ?? "")
             ? "pending"
             : conclusion === "SUCCESS" || status === "SUCCESS"
               ? "success"
