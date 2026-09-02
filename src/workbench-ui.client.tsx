@@ -1174,13 +1174,17 @@ export function Workbench({
     selected && detailResource && !detailIsBehindSummary
       ? mergeDetailedResource(selected, detailResource)
       : selected;
+  const staleDetailVersion =
+    detailIsBehindSummary && selectedResourceKey && selectedUpdatedAt
+      ? `${selectedResourceKey}:${selectedUpdatedAt}`
+      : null;
   useEffect(() => {
-    if (!selectedResourceKey || !detailIsBehindSummary) return;
+    if (!selectedResourceKey || !staleDetailVersion) return;
     void queryClient.invalidateQueries({
       queryKey: resourceDetailQueryKey(host.id, selectedResourceKey),
       refetchType: "active",
     });
-  }, [detailIsBehindSummary, host.id, queryClient, selectedResourceKey]);
+  }, [host.id, queryClient, selectedResourceKey, staleDetailVersion]);
   useEffect(() => {
     if (
       selectedKey &&
