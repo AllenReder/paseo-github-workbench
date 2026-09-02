@@ -28,13 +28,13 @@ GitHub Workbench 是一个 [Paseo](https://github.com/getpaseo/paseo) 插件，�
 ## 环境要求
 
 - Paseo 0.7 或更高版本。
-- 在运行 Paseo 守护进程的机器上安装 [GitHub CLI](https://cli.github.com/)（`gh`）。
-- 已为需要查看其资源的 GitHub 账户完成 `gh auth login`。访问私有仓库需要具有相应仓库权限的令牌。
+- 推荐：在运行 Paseo 守护进程的机器上设置 `GH_TOKEN`（或 `GITHUB_TOKEN`）。插件会直接调用 GitHub GraphQL API，无需安装 GitHub CLI；令牌需要具备访问目标仓库的权限。
+- 或者：在 Paseo 守护进程宿主机上安装 [GitHub CLI](https://cli.github.com/)（`gh`），并完成 `gh auth login`。这是无需额外配置令牌的兼容方案。
 - 已安装 Git，以使用工作区和 worktree 功能。
 
 ## 已知限制
 
-- GitHub Workbench 仅支持 GitHub，并依赖 Paseo 守护进程宿主机上的 GitHub CLI（`gh`）；暂不支持其他代码托管平台。
+- GitHub Workbench 仅支持 GitHub；暂不支持其他代码托管平台。
 
 ## 安装
 
@@ -42,7 +42,7 @@ GitHub Workbench 是一个 [Paseo](https://github.com/getpaseo/paseo) 插件，�
 
     paseo plugin add AllenReder/paseo-github-workbench --ref main
 
-然后打开 Paseo 的插件设置：如有需要先启用插件功能，再启用 **GitHub Workbench**。插件属于受信任代码：其服务端代码会在 Paseo 守护进程宿主机上运行，并可使用该用户的权限调用 `gh` 和 `git`。
+然后打开 Paseo 的插件设置：如有需要先启用插件功能，再启用 **GitHub Workbench**。插件属于受信任代码：其服务端代码会在 Paseo 守护进程宿主机上运行，并可访问 `GH_TOKEN`/`GITHUB_TOKEN`，或使用该用户的权限调用 `gh` 和 `git`。
 
 查看插件状态、日志或更新已跟踪的安装：
 

@@ -44,17 +44,19 @@ detail action opens an existing Paseo workspace or creates one when needed.
 ## Requirements
 
 - Paseo 0.7 or newer.
-- [GitHub CLI](https://cli.github.com/) (gh) installed on the machine running
-  the Paseo daemon.
-- gh auth login completed for the GitHub account whose resources you want to
-  see. Accessing private repositories requires a token with the corresponding
-  repository permissions.
+- Preferred: a GitHub token in `GH_TOKEN` (or `GITHUB_TOKEN`) on the machine
+  running the Paseo daemon. This uses GitHub's GraphQL API directly and does
+  not require the GitHub CLI. The token needs access to the repositories you
+  want to see.
+- Or: [GitHub CLI](https://cli.github.com/) (gh) installed and authenticated
+  with `gh auth login` on the Paseo daemon host. This remains the zero-config
+  fallback.
 - Git installed for workspace and worktree actions.
 
 ## Known limitations
 
-- GitHub Workbench supports GitHub only and relies on the GitHub CLI (gh) on
-  the Paseo daemon host. Other code-hosting providers are not supported.
+- GitHub Workbench supports GitHub only. Other code-hosting providers are not
+  supported.
 
 ## Install
 
@@ -64,7 +66,8 @@ Install directly from GitHub:
 
 Then open Paseo's plugin settings, enable plugins if necessary, and enable
 **GitHub Workbench**. Plugins are trusted code: its server side runs on the
-Paseo daemon host and can invoke gh and git with that user's permissions.
+Paseo daemon host and can access `GH_TOKEN`/`GITHUB_TOKEN` or invoke gh and
+git with that user's permissions.
 
 To inspect its lifecycle or update a tracked installation:
 

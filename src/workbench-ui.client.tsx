@@ -4,6 +4,7 @@ import { useToast } from "@getpaseo/plugin/react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  FlatList,
   Linking,
   Pressable,
   ScrollView,
@@ -39,6 +40,7 @@ type WorkbenchProps = PluginSurfaceProps & {
 type ContentTab = "all" | "issue" | "pull-request" | "mine" | "review";
 type OwnershipFilter = "all" | "mine" | "assigned" | "review";
 type StatusFilter = LifecycleState;
+const WORKBENCH_STALE_TIME_MS = 5 * 60_000;
 export function clampWorkbenchListWidth(
   availableWidth: number,
   requestedWidth: number,
@@ -68,7 +70,7 @@ function usePaseoDirectory(hostId: string) {
   );
   const query = useQuery({
     queryKey,
-    staleTime: 0,
+    staleTime: WORKBENCH_STALE_TIME_MS,
     queryFn: async () => {
       const workspaces: WorkspaceSnapshot[] = [];
       const agents: PaseoDirectorySnapshot["agents"] = [];
@@ -1056,7 +1058,9 @@ export function Workbench({
     scope.scope === "repository" ? `repository:${scope.repository}` : "account";
   const query = useQuery({
     queryKey,
-    refetchInterval: 60_000,
+    staleTime: WORKBENCH_STALE_TIME_MS,
+    refetchInterval: WORKBENCH_STALE_TIME_MS,
+    refetchIntervalInBackground: false,
     queryFn: () =>
       listResources(
         scope.scope === "repository"
@@ -1147,24 +1151,19 @@ export function Workbench({
           resource.reviewRequestedFromMe),
     ).length;
   const refresh = useCallback(() => {
-    queryClient
-      .fetchQuery({
-        queryKey: [...queryKey, "forced"],
-        queryFn: () =>
-          listResources(
-            scope.scope === "repository"
-              ? {
-                  scope: "repository",
-                  repository: scope.repository,
-                  state: status,
-                  forceRefresh: true,
-                }
-              : { scope: "account", state: status, forceRefresh: true },
-          ),
-      })
-      .then(() => query.refetch())
+    listResources(
+      scope.scope === "repository"
+        ? {
+            scope: "repository",
+            repository: scope.repository,
+            state: status,
+            forceRefresh: true,
+          }
+        : { scope: "account", state: status, forceRefresh: true },
+    )
+      .then((data) => queryClient.setQueryData(queryKey, data))
       .catch(() => undefined);
-  }, [listResources, query, queryClient, queryKey, scope, status]);
+  }, [listResources, queryClient, queryKey, scope, status]);
   const refreshItem = useCallback(
     (resource: GitHubResource) => {
       setRefreshingKey(resource.key);
@@ -1426,7 +1425,7 @@ export function Workbench({
           {warning.message}
         </Text>
       ))}
-      {query.isLoading || directory.isLoading ? (
+      {query.isLoading ? (
         <Text
           accessibilityLiveRegion="polite"
           style={{ color: theme.colors.foregroundMuted, padding: 16 }}
@@ -1444,25 +1443,30 @@ export function Workbench({
             : t("workbench.unableToLoad")}
         </Text>
       ) : null}
-      <ScrollView
-        contentContainerStyle={{ gap: 2, padding: 8 }}
-        style={{ flex: 1 }}
-      >
-        {rows.map(({ resource }) => (
+      <FlatList
+        data={rows}
+        keyExtractor={({ resource }) => resource.key}
+        renderItem={({ item }) => (
           <ListRow
-            key={resource.key}
-            resource={resource}
-            selected={selectedKey === resource.key}
-            onPress={() => setSelectedKey(resource.key)}
+            resource={item.resource}
+            selected={selectedKey === item.resource.key}
+            onPress={() => setSelectedKey(item.resource.key)}
             theme={theme}
           />
-        ))}
-        {!query.isLoading && rows.length === 0 ? (
-          <Text style={{ color: theme.colors.foregroundMuted, padding: 14 }}>
-            {t("workbench.empty")}
-          </Text>
-        ) : null}
-      </ScrollView>
+        )}
+        initialNumToRender={20}
+        maxToRenderPerBatch={20}
+        windowSize={7}
+        contentContainerStyle={{ gap: 2, padding: 8 }}
+        style={{ flex: 1 }}
+        ListEmptyComponent={
+          !query.isLoading ? (
+            <Text style={{ color: theme.colors.foregroundMuted, padding: 14 }}>
+              {t("workbench.empty")}
+            </Text>
+          ) : null
+        }
+      />
     </View>
   );
   return (
@@ -1605,6 +1609,7 @@ export function useProjectRepositories(
   const query = useQuery({
     queryKey,
     enabled: Boolean(projectId),
+    staleTime: WORKBENCH_STALE_TIME_MS,
     queryFn: async () => {
       if (!projectId) return [];
       const repositories = new Set<string>();

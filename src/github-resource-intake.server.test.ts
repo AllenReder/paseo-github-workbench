@@ -2,68 +2,73 @@ import { describe, expect, it } from "bun:test";
 import { createGitHubResourceIntake } from "./github-resource-intake.server";
 
 describe("GitHubResourceIntake", () => {
-  it("coalesces concurrent repository queries and caches results for 30 seconds", async () => {
-    let prCalls = 0;
-    let issueCalls = 0;
+  it("coalesces concurrent repository queries and caches the result", async () => {
+    let calls = 0;
     const intake = createGitHubResourceIntake(async (args) => {
-      if (args[0] === "pr") {
-        prCalls += 1;
-        return {
-          stdout: JSON.stringify([
-            {
-              number: 42,
-              title: "Test PR",
-              url: "https://github.com/getpaseo/paseo/pull/42",
-              body: "PR list description",
-              author: { login: "alice" },
-              headRefName: "feature-branch",
-              baseRefName: "main",
-              isDraft: false,
-              labels: { nodes: [{ name: "enhancement" }] },
-              createdAt: "2026-02-01T00:00:00Z",
-              updatedAt: "2026-02-02T00:00:00Z",
-              reviewDecision: "APPROVED",
-              statusCheckRollup: {
-                state: "SUCCESS",
-                contexts: {
-                  nodes: [
-                    {
-                      name: "test",
-                      status: "COMPLETED",
-                      conclusion: "SUCCESS",
+      expect(args.slice(0, 2)).toEqual(["api", "graphql"]);
+      expect(args.join(" ")).toContain("contexts(first: 20)");
+      calls += 1;
+      return {
+        stdout: JSON.stringify({
+          data: {
+            repository: {
+              pullRequests: {
+                nodes: [
+                  {
+                    number: 42,
+                    title: "Test PR",
+                    url: "https://github.com/getpaseo/paseo/pull/42",
+                    body: "PR list description",
+                    author: { login: "alice" },
+                    repository: { nameWithOwner: "getpaseo/paseo" },
+                    assignees: { nodes: [] },
+                    headRefName: "feature-branch",
+                    baseRefName: "main",
+                    isDraft: false,
+                    labels: { nodes: [{ name: "enhancement" }] },
+                    createdAt: "2026-02-01T00:00:00Z",
+                    updatedAt: "2026-02-02T00:00:00Z",
+                    reviewDecision: "APPROVED",
+                    statusCheckRollup: {
+                      state: "SUCCESS",
+                      contexts: {
+                        nodes: [
+                          {
+                            name: "test",
+                            status: "COMPLETED",
+                            conclusion: "SUCCESS",
+                          },
+                        ],
+                      },
                     },
-                  ],
-                },
+                    mergeable: "MERGEABLE",
+                    comments: { totalCount: 2 },
+                  },
+                ],
               },
-              mergeable: "MERGEABLE",
-              comments: { totalCount: 2 },
+              issues: {
+                nodes: [
+                  {
+                    number: 99,
+                    title: "Test Issue",
+                    body: "Issue list description",
+                    url: "https://github.com/getpaseo/paseo/issues/99",
+                    repository: { nameWithOwner: "getpaseo/paseo" },
+                    author: { login: "bob" },
+                    assignees: { nodes: [] },
+                    labels: { nodes: [] },
+                    milestone: null,
+                    comments: { totalCount: 0 },
+                    createdAt: "2026-02-01T00:00:00Z",
+                    updatedAt: "2026-02-01T00:00:00Z",
+                  },
+                ],
+              },
             },
-          ]),
-          stderr: "",
-        };
-      }
-      if (args[0] === "issue") {
-        issueCalls += 1;
-        return {
-          stdout: JSON.stringify([
-            {
-              number: 99,
-              title: "Test Issue",
-              body: "Issue list description",
-              url: "https://github.com/getpaseo/paseo/issues/99",
-              author: { login: "bob" },
-              assignees: { nodes: [] },
-              labels: { nodes: [] },
-              milestone: null,
-              comments: { totalCount: 0 },
-              createdAt: "2026-02-01T00:00:00Z",
-              updatedAt: "2026-02-01T00:00:00Z",
-            },
-          ]),
-          stderr: "",
-        };
-      }
-      throw new Error(`Unexpected command: ${args.join(" ")}`);
+          },
+        }),
+        stderr: "",
+      };
     });
 
     const [first, second] = await Promise.all([
@@ -77,8 +82,7 @@ describe("GitHubResourceIntake", () => {
       }),
     ]);
 
-    expect(prCalls).toBe(1);
-    expect(issueCalls).toBe(1);
+    expect(calls).toBe(1);
     expect(
       first.resources.find((resource) => resource.kind === "pull-request")
         ?.body,
@@ -95,8 +99,7 @@ describe("GitHubResourceIntake", () => {
       scope: "repository",
       repository: "getpaseo/paseo",
     });
-    expect(prCalls).toBe(1);
-    expect(issueCalls).toBe(1);
+    expect(calls).toBe(1);
     expect(third.resources).toHaveLength(2);
 
     const fourth = await intake.listResources({
@@ -104,8 +107,7 @@ describe("GitHubResourceIntake", () => {
       repository: "getpaseo/paseo",
       forceRefresh: true,
     });
-    expect(prCalls).toBe(2);
-    expect(issueCalls).toBe(2);
+    expect(calls).toBe(2);
     expect(fourth.resources).toHaveLength(2);
   });
 
@@ -123,7 +125,7 @@ describe("GitHubResourceIntake", () => {
       repository: "getpaseo/paseo",
     });
 
-    expect(calls).toBe(2); // pr list and issue list run concurrently
+    expect(calls).toBe(1); // one batched GraphQL query for the repository
     expect(result.resources).toHaveLength(0);
     expect(result.warnings).toHaveLength(1);
     expect(result.warnings[0].code).toBe("gh-cli-not-found");
@@ -133,14 +135,44 @@ describe("GitHubResourceIntake", () => {
       scope: "repository",
       repository: "getpaseo/paseo",
     });
-    expect(calls).toBe(4);
+    expect(calls).toBe(2);
+  });
+
+  it("does not cache a null repository GraphQL error as an empty result", async () => {
+    let calls = 0;
+    const intake = createGitHubResourceIntake(async () => {
+      calls += 1;
+      return {
+        stdout: JSON.stringify({
+          data: { repository: null },
+          errors: [
+            {
+              message:
+                "Could not resolve to a Repository with the name 'missing/repo'.",
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    });
+
+    const first = await intake.listResources({
+      scope: "repository",
+      repository: "missing/repo",
+    });
+    const second = await intake.listResources({
+      scope: "repository",
+      repository: "missing/repo",
+    });
+
+    expect(first.resources).toHaveLength(0);
+    expect(first.warnings[0]?.code).toBe("repository-unavailable");
+    expect(second.warnings[0]?.code).toBe("repository-unavailable");
+    expect(calls).toBe(2);
   });
 
   it("handles account scope, resolves viewer, and merges relationship flags", async () => {
     const intake = createGitHubResourceIntake(async (args) => {
-      if (args[0] === "api" && args[1] === "user") {
-        return { stdout: "octocat\n", stderr: "" };
-      }
       if (args[0] === "api" && args[1] === "graphql") {
         const queryArg =
           args.find((arg) => arg.startsWith("query=")) ??
@@ -166,6 +198,13 @@ describe("GitHubResourceIntake", () => {
         }
         expect(hadOpenBrace).toBe(true);
         expect(braceDepth).toBe(0);
+
+        if (rawQuery.includes("WorkbenchViewer")) {
+          return {
+            stdout: JSON.stringify({ data: { viewer: { login: "octocat" } } }),
+            stderr: "",
+          };
+        }
 
         return {
           stdout: JSON.stringify({
@@ -269,29 +308,37 @@ describe("GitHubResourceIntake", () => {
     expect(issue?.isAssignedToMe).toBe(true);
   });
 
-  it("marks a completed successful gh pr view check rollup as passing", async () => {
+  it("marks a completed successful GraphQL check rollup as passing", async () => {
     const intake = createGitHubResourceIntake(async () => ({
       stdout: JSON.stringify({
-        number: 411,
-        title: "Completed CI",
-        url: "https://github.com/AllenReder/mc-agent-runtime/pull/411",
-        author: { login: "AllenReder" },
-        headRefName: "fast-insect",
-        baseRefName: "main",
-        isDraft: false,
-        labels: [],
-        updatedAt: "2026-09-02T08:50:19Z",
-        createdAt: "2026-09-02T08:45:43Z",
-        reviewDecision: "",
-        statusCheckRollup: [
-          {
-            name: "TypeScript checks",
-            status: "COMPLETED",
-            conclusion: "SUCCESS",
+        data: {
+          repository: {
+            pullRequest: {
+              number: 411,
+              title: "Completed CI",
+              url: "https://github.com/AllenReder/mc-agent-runtime/pull/411",
+              repository: { nameWithOwner: "AllenReder/mc-agent-runtime" },
+              author: { login: "AllenReder" },
+              assignees: { nodes: [] },
+              headRefName: "fast-insect",
+              baseRefName: "main",
+              isDraft: false,
+              labels: [],
+              updatedAt: "2026-09-02T08:50:19Z",
+              createdAt: "2026-09-02T08:45:43Z",
+              reviewDecision: "",
+              statusCheckRollup: [
+                {
+                  name: "TypeScript checks",
+                  status: "COMPLETED",
+                  conclusion: "SUCCESS",
+                },
+              ],
+              mergeable: "MERGEABLE",
+              comments: [],
+            },
           },
-        ],
-        mergeable: "MERGEABLE",
-        comments: [],
+        },
       }),
       stderr: "",
     }));
@@ -307,28 +354,40 @@ describe("GitHubResourceIntake", () => {
       checkDetails: [{ name: "TypeScript checks", status: "success" }],
     });
   });
-  it("refreshes a single resource with pr view or issue view", async () => {
+  it("refreshes a single resource with GraphQL", async () => {
     const intake = createGitHubResourceIntake(async (args) => {
-      if (args[0] === "pr" && args[1] === "view") {
+      if (args[0] === "api" && args[1] === "graphql") {
         return {
           stdout: JSON.stringify({
-            number: 15,
-            title: "Refreshed PR",
-            body: "Refreshed description",
-            url: "https://github.com/owner/repo/pull/15",
-            author: { login: "dev" },
-            headRefName: "feature",
-            baseRefName: "main",
-            isDraft: false,
-            labels: [],
-            updatedAt: "2026-02-05T00:00:00Z",
-            createdAt: "2026-02-01T00:00:00Z",
-            reviewDecision: "CHANGES_REQUESTED",
-            statusCheckRollup: [
-              { name: "build", status: "COMPLETED", conclusion: "FAILURE" },
-            ],
-            mergeable: "CONFLICTING",
-            comments: 5,
+            data: {
+              repository: {
+                pullRequest: {
+                  number: 15,
+                  title: "Refreshed PR",
+                  body: "Refreshed description",
+                  url: "https://github.com/owner/repo/pull/15",
+                  repository: { nameWithOwner: "owner/repo" },
+                  author: { login: "dev" },
+                  assignees: { nodes: [] },
+                  headRefName: "feature",
+                  baseRefName: "main",
+                  isDraft: false,
+                  labels: [],
+                  updatedAt: "2026-02-05T00:00:00Z",
+                  createdAt: "2026-02-01T00:00:00Z",
+                  reviewDecision: "CHANGES_REQUESTED",
+                  statusCheckRollup: [
+                    {
+                      name: "build",
+                      status: "COMPLETED",
+                      conclusion: "FAILURE",
+                    },
+                  ],
+                  mergeable: "CONFLICTING",
+                  comments: 5,
+                },
+              },
+            },
           }),
           stderr: "",
         };
@@ -372,5 +431,75 @@ describe("GitHubResourceIntake", () => {
     ).rejects.toThrow(
       "The GitHub repository is unavailable or you do not have access.",
     );
+  });
+
+  it("uses GH_TOKEN's native GraphQL transport without starting gh", async () => {
+    let ghCalls = 0;
+    let fetchCalls = 0;
+    const intake = createGitHubResourceIntake(
+      async () => {
+        ghCalls += 1;
+        throw new Error("gh must not run when a token is configured");
+      },
+      {
+        token: "test-token",
+        fetch: async (_url, init) => {
+          fetchCalls += 1;
+          const headers = init?.headers ?? {};
+          expect((headers as Record<string, string>).Authorization).toBe(
+            "Bearer test-token",
+          );
+          return new Response(
+            JSON.stringify({
+              data: {
+                repository: {
+                  pullRequests: { nodes: [] },
+                  issues: {
+                    nodes: [
+                      {
+                        number: 99,
+                        title: "Native API issue",
+                        body: "No subprocess required",
+                        url: "https://github.com/owner/repo/issues/99",
+                        repository: { nameWithOwner: "owner/repo" },
+                        author: { login: "octocat" },
+                        assignees: { nodes: [] },
+                        labels: { nodes: [] },
+                        comments: { totalCount: 0 },
+                        createdAt: "2026-02-01T00:00:00Z",
+                        updatedAt: "2026-02-01T00:00:00Z",
+                      },
+                    ],
+                  },
+                },
+              },
+              errors: [{ message: "Resource not accessible by integration" }],
+            }),
+            { status: 200 },
+          );
+        },
+      },
+    );
+
+    const first = await intake.listResources({
+      scope: "repository",
+      repository: "owner/repo",
+    });
+    const second = await intake.listResources({
+      scope: "repository",
+      repository: "owner/repo",
+    });
+
+    expect(first.resources).toHaveLength(1);
+    expect(second.resources).toHaveLength(1);
+    expect(first.warnings).toEqual([
+      {
+        code: "github-query-failed",
+        message:
+          "Some GitHub fields could not be loaded: Resource not accessible by integration",
+      },
+    ]);
+    expect(fetchCalls).toBe(1);
+    expect(ghCalls).toBe(0);
   });
 });
