@@ -25,7 +25,17 @@ function ProjectGitHubWorkbenchPanelInner(props: PluginWorkspacePanelProps) {
     ],
     enabled: Boolean(props.workspaceId),
     staleTime: 4 * 60_000,
-    queryFn: () => paseo.workspaces.ref(props.workspaceId).refresh(),
+    queryFn: async () => {
+      const response = await paseo.workspaces.list({
+        filter: { idPrefix: props.workspaceId },
+        page: { limit: 20 },
+      });
+      return (
+        response.entries.find(
+          (workspace) => workspace.id === props.workspaceId,
+        ) ?? null
+      );
+    },
   });
   // The plugin workspace snapshot intentionally omits git runtime details, so
   // refresh only this workspace for its remote. This runs in parallel with the
