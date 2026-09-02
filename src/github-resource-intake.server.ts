@@ -259,7 +259,13 @@ function checkStatusFromGraphql(
 }
 
 function checkDetailsFrom(value: unknown): PullRequestResource["checkDetails"] {
-  const records = Array.isArray(value) ? value : asRecord(value)?.nodes;
+  const record = asRecord(value);
+  const contexts = asRecord(record?.contexts);
+  const records = Array.isArray(value)
+    ? value
+    : Array.isArray(record?.nodes)
+      ? record.nodes
+      : contexts?.nodes;
   if (!Array.isArray(records)) return [];
   return records
     .flatMap((item) => {

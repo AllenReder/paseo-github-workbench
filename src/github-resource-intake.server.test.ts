@@ -329,13 +329,18 @@ describe("GitHubResourceIntake", () => {
               updatedAt: "2026-09-02T08:50:19Z",
               createdAt: "2026-09-02T08:45:43Z",
               reviewDecision: "",
-              statusCheckRollup: [
-                {
-                  name: "TypeScript checks",
-                  status: "COMPLETED",
-                  conclusion: "SUCCESS",
+              statusCheckRollup: {
+                state: "SUCCESS",
+                contexts: {
+                  nodes: [
+                    {
+                      name: "TypeScript checks",
+                      status: "COMPLETED",
+                      conclusion: "SUCCESS",
+                    },
+                  ],
                 },
-              ],
+              },
               mergeable: "MERGEABLE",
               comments: [],
             },
