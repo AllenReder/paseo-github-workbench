@@ -1,3 +1,4 @@
+import type { PaseoAgentUpdate, PaseoWorkspaceUpdate } from "@getpaseo/client";
 import type { PluginHostProps, PluginSurfaceProps } from "@getpaseo/plugin";
 import { usePaseo, useRpc } from "@getpaseo/plugin";
 import { useToast } from "@getpaseo/plugin/react-native";
@@ -51,6 +52,10 @@ type ResourceDetailQueryData = {
   resource: GitHubResource;
   summaryVersion: string;
 };
+type DirectoryFetchTransaction = {
+  workspaceUpdates: PaseoWorkspaceUpdate[];
+  agentUpdates: PaseoAgentUpdate[];
+};
 const WORKBENCH_STALE_TIME_MS = 5 * 60_000;
 const STABLE_WORKBENCH_STALE_TIME_MS = 30 * 60_000;
 const RESOURCE_DETAIL_STALE_TIME_MS = 10 * 60_000;
@@ -94,72 +99,93 @@ function usePaseoDirectory(hostId: string) {
     () => `github-workbench:${hostId}:agents`,
     [hostId],
   );
+  const fetchTransactions = useRef<Set<DirectoryFetchTransaction>>(new Set());
   const query = useQuery({
     queryKey,
     staleTime: WORKBENCH_STALE_TIME_MS,
+    refetchInterval: DIRECTORY_RECONCILE_INTERVAL_MS,
+    refetchIntervalInBackground: false,
     queryFn: async () => {
-      const workspacesPromise = (async () => {
-        const workspaces: WorkspaceSnapshot[] = [];
-        let cursor: string | undefined;
-        for (let page = 0; page < 10; page += 1) {
-          const response = await paseo.workspaces.list({
-            ...(!cursor
-              ? { subscribe: { subscriptionId: workspaceSubscriptionId } }
-              : {}),
-            page: {
-              limit: 200,
-              ...(cursor ? { cursor } : {}),
-            },
-          });
-          workspaces.push(...response.entries.map(toWorkspaceSnapshot));
-          cursor = response.pageInfo.nextCursor ?? undefined;
-          if (!cursor) break;
+      const transaction: DirectoryFetchTransaction = {
+        workspaceUpdates: [],
+        agentUpdates: [],
+      };
+      fetchTransactions.current.add(transaction);
+      try {
+        const workspacesPromise = (async () => {
+          const workspaces: WorkspaceSnapshot[] = [];
+          let cursor: string | undefined;
+          for (let page = 0; page < 10; page += 1) {
+            const response = await paseo.workspaces.list({
+              ...(!cursor
+                ? { subscribe: { subscriptionId: workspaceSubscriptionId } }
+                : {}),
+              page: {
+                limit: 200,
+                ...(cursor ? { cursor } : {}),
+              },
+            });
+            workspaces.push(...response.entries.map(toWorkspaceSnapshot));
+            cursor = response.pageInfo.nextCursor ?? undefined;
+            if (!cursor) break;
+          }
+          return workspaces;
+        })();
+        const agentsPromise = (async () => {
+          const agents: PaseoDirectorySnapshot["agents"] = [];
+          let cursor: string | undefined;
+          for (let page = 0; page < 10; page += 1) {
+            const response = await paseo.agents.list({
+              ...(!cursor
+                ? { subscribe: { subscriptionId: agentSubscriptionId } }
+                : {}),
+              page: { limit: 200, ...(cursor ? { cursor } : {}) },
+            });
+            agents.push(
+              ...response.entries.map(({ agent }) => toAgentSnapshot(agent)),
+            );
+            cursor = response.pageInfo.nextCursor ?? undefined;
+            if (!cursor) break;
+          }
+          return agents;
+        })();
+        const [workspaces, agents] = await Promise.all([
+          workspacesPromise,
+          agentsPromise,
+        ]);
+        let snapshot = { workspaces, agents } satisfies PaseoDirectorySnapshot;
+        for (const update of transaction.workspaceUpdates) {
+          snapshot = applyWorkspaceUpdate(snapshot, update);
         }
-        return workspaces;
-      })();
-      const agentsPromise = (async () => {
-        const agents: PaseoDirectorySnapshot["agents"] = [];
-        let cursor: string | undefined;
-        for (let page = 0; page < 10; page += 1) {
-          const response = await paseo.agents.list({
-            ...(!cursor
-              ? { subscribe: { subscriptionId: agentSubscriptionId } }
-              : {}),
-            page: { limit: 200, ...(cursor ? { cursor } : {}) },
-          });
-          agents.push(
-            ...response.entries.map(({ agent }) => toAgentSnapshot(agent)),
-          );
-          cursor = response.pageInfo.nextCursor ?? undefined;
-          if (!cursor) break;
+        for (const update of transaction.agentUpdates) {
+          snapshot = applyAgentUpdate(snapshot, update);
         }
-        return agents;
-      })();
-      const [workspaces, agents] = await Promise.all([
-        workspacesPromise,
-        agentsPromise,
-      ]);
-      return { workspaces, agents } satisfies PaseoDirectorySnapshot;
+        return snapshot;
+      } finally {
+        fetchTransactions.current.delete(transaction);
+      }
     },
   });
   useEffect(() => {
     const stopWorkspaces = paseo.workspaces.subscribe((update) => {
+      for (const transaction of fetchTransactions.current) {
+        transaction.workspaceUpdates.push(update);
+      }
       queryClient.setQueryData<PaseoDirectorySnapshot>(queryKey, (snapshot) =>
         snapshot ? applyWorkspaceUpdate(snapshot, update) : snapshot,
       );
     });
     const stopAgents = paseo.agents.subscribe((update) => {
+      for (const transaction of fetchTransactions.current) {
+        transaction.agentUpdates.push(update);
+      }
       queryClient.setQueryData<PaseoDirectorySnapshot>(queryKey, (snapshot) =>
         snapshot ? applyAgentUpdate(snapshot, update) : snapshot,
       );
     });
-    const reconcile = setInterval(() => {
-      queryClient.invalidateQueries({ queryKey, refetchType: "active" });
-    }, DIRECTORY_RECONCILE_INTERVAL_MS);
     return () => {
       stopWorkspaces();
       stopAgents();
-      clearInterval(reconcile);
     };
   }, [paseo, queryClient, queryKey]);
   return query;
