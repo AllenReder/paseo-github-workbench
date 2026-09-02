@@ -48,6 +48,7 @@ type ResourceDetailQueryData = {
   summaryVersion: string;
 };
 const WORKBENCH_STALE_TIME_MS = 5 * 60_000;
+const STABLE_WORKBENCH_STALE_TIME_MS = 30 * 60_000;
 const RESOURCE_DETAIL_STALE_TIME_MS = 10 * 60_000;
 
 function resourceDetailQueryKey(hostId: string, resourceKey: string | null) {
@@ -1092,10 +1093,14 @@ export function Workbench({
   ] as const;
   const scopeKey =
     scope.scope === "repository" ? `repository:${scope.repository}` : "account";
+  const workbenchRefreshIntervalMs =
+    status === "open"
+      ? WORKBENCH_STALE_TIME_MS
+      : STABLE_WORKBENCH_STALE_TIME_MS;
   const query = useQuery({
     queryKey,
-    staleTime: WORKBENCH_STALE_TIME_MS,
-    refetchInterval: WORKBENCH_STALE_TIME_MS,
+    staleTime: workbenchRefreshIntervalMs,
+    refetchInterval: workbenchRefreshIntervalMs,
     refetchIntervalInBackground: false,
     queryFn: () =>
       listResources(
