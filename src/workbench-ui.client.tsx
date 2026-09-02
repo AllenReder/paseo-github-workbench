@@ -46,6 +46,9 @@ const RESOURCE_DETAIL_STALE_TIME_MS = 10 * 60_000;
 function resourceDetailQueryKey(hostId: string, resourceKey: string | null) {
   return ["github-workbench", hostId, "resource-detail", resourceKey] as const;
 }
+function resourceDetailQueryPrefix(hostId: string) {
+  return ["github-workbench", hostId, "resource-detail"] as const;
+}
 export function clampWorkbenchListWidth(
   availableWidth: number,
   requestedWidth: number,
@@ -1163,28 +1166,25 @@ export function Workbench({
     },
   });
   const selectedForDetail =
-    selected && selectedDetailQuery.data?.resource
+    selected &&
+    selectedDetailQuery.data?.resource &&
+    selectedDetailQuery.dataUpdatedAt >= query.dataUpdatedAt
       ? mergeRefreshedResource(selected, selectedDetailQuery.data.resource)
       : selected;
-  const selectedResourceKey = selected?.key ?? null;
   const lastListRefreshRef = useRef<string | null>(null);
   useEffect(() => {
     const refreshedAt = query.data?.refreshedAt;
     if (!refreshedAt) return;
     const previousRefreshedAt = lastListRefreshRef.current;
     lastListRefreshRef.current = refreshedAt;
-    if (
-      !selectedResourceKey ||
-      previousRefreshedAt === null ||
-      previousRefreshedAt === refreshedAt
-    ) {
+    if (previousRefreshedAt === null || previousRefreshedAt === refreshedAt) {
       return;
     }
     void queryClient.invalidateQueries({
-      queryKey: resourceDetailQueryKey(host.id, selectedResourceKey),
+      queryKey: resourceDetailQueryPrefix(host.id),
       refetchType: "active",
     });
-  }, [host.id, query.data?.refreshedAt, queryClient, selectedResourceKey]);
+  }, [host.id, query.data?.refreshedAt, queryClient]);
   useEffect(() => {
     if (
       selectedKey &&
@@ -1217,24 +1217,15 @@ export function Workbench({
         : { scope: "account", state: status, forceRefresh: true },
     )
       .then((data) => {
+        lastListRefreshRef.current = data.refreshedAt;
         queryClient.setQueryData(queryKey, data);
-        if (selectedResourceKey) {
-          void queryClient.invalidateQueries({
-            queryKey: resourceDetailQueryKey(host.id, selectedResourceKey),
-            refetchType: "active",
-          });
-        }
+        void queryClient.invalidateQueries({
+          queryKey: resourceDetailQueryPrefix(host.id),
+          refetchType: "active",
+        });
       })
       .catch(() => undefined);
-  }, [
-    host.id,
-    listResources,
-    queryClient,
-    queryKey,
-    scope,
-    selectedResourceKey,
-    status,
-  ]);
+  }, [host.id, listResources, queryClient, queryKey, scope, status]);
   const refreshItem = useCallback(
     (resource: GitHubResource) => {
       setRefreshingKey(resource.key);
