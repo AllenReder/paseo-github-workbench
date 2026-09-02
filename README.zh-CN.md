@@ -1,21 +1,16 @@
 # Paseo GitHub Workbench
 
-[English](README.md)
+[English](README.md) | [简体中文](README.zh-CN.md)
 
 GitHub Workbench 是一个 [Paseo](https://github.com/getpaseo/paseo) 插件，让你无需离开 Paseo，即可处理 GitHub Issue 和拉取请求（Pull Request）。
 
 它会汇集你的账户或所选仓库中的资源，以紧凑的工作台形式展示 GitHub 状态；并能为某个 Issue 或拉取请求创建或重新打开对应的 Paseo 工作区。
 
-## 截图
+## 界面与布局
 
-### 账户工作台
+响应式深色工作台采用类似 Codex 的双栏设计：左侧面板列出 GitHub Issue 和拉取请求，右侧面板展示所选资源的元数据、正文描述以及关联的详细信息。在宽屏布局下，默认采用 1:1 等分比例，并可通过拖动可见的分隔线在 30% 至 70% 之间调整列表宽度；在紧凑布局下，点击资源将直接打开详情面板，并提供返回列表的快捷操作。
 
-![显示 GitHub 拉取请求和 Issue 的账户工作台](1.png)
-
-### 项目工作台
-
-![按所选仓库筛选的项目工作台](2.png)
-
+你可以通过顶部的“全部”、“Issue”、“PR”、“我的”和“评审”标签快速切换列表范围。筛选菜单支持按 GitHub 状态（未关闭、已合并、已关闭）、GitHub 仓库、工作流阶段及归属关系进行精确过滤。详情面板操作可一键打开对应的现有 Paseo 工作区，或按需新建工作区。
 ## 功能
 
 - 列出某个账户或仓库中处于打开状态的 GitHub Issue 和拉取请求。
