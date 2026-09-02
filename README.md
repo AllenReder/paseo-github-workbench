@@ -40,6 +40,11 @@ Paseo workspace for an issue or pull request.
   repository permissions.
 - Git installed for workspace and worktree actions.
 
+## Known limitations
+
+- GitHub Workbench supports GitHub only and relies on the GitHub CLI (gh) on
+  the Paseo daemon host. Other code-hosting providers are not supported.
+
 ## Install
 
 Install directly from GitHub:
