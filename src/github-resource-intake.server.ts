@@ -216,27 +216,66 @@ function labelsFrom(value: unknown): string[] {
 
 function summarizeChecks(checks: unknown): PullRequestResource["checksStatus"] {
   if (!Array.isArray(checks) || checks.length === 0) return "none";
-  let sawKnown = false;
+  let sawFailure = false;
+  let sawPending = false;
+  let sawSuccess = false;
   for (const check of checks) {
     if (!check || typeof check !== "object") continue;
     const record = check as Record<string, unknown>;
     const status =
-      typeof record.status === "string" ? record.status.toUpperCase() : "";
-    if (status && status !== "COMPLETED") return "pending";
+      typeof record.status === "string"
+        ? record.status.toUpperCase()
+        : typeof record.state === "string"
+          ? record.state.toUpperCase()
+          : "";
     const conclusion =
       typeof record.conclusion === "string"
         ? record.conclusion.toUpperCase()
         : "";
     if (
-      ["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"].includes(
-        conclusion,
-      )
-    )
-      return "failure";
-    if (["SUCCESS", "NEUTRAL", "SKIPPED", "STALE"].includes(conclusion))
-      sawKnown = true;
+      [
+        "FAILURE",
+        "ERROR",
+        "TIMED_OUT",
+        "CANCELLED",
+        "ACTION_REQUIRED",
+        "STARTUP_FAILURE",
+      ].includes(conclusion) ||
+      [
+        "FAILURE",
+        "ERROR",
+        "TIMED_OUT",
+        "CANCELLED",
+        "ACTION_REQUIRED",
+        "STARTUP_FAILURE",
+      ].includes(status)
+    ) {
+      sawFailure = true;
+      continue;
+    }
+    if (
+      [
+        "IN_PROGRESS",
+        "PENDING",
+        "QUEUED",
+        "EXPECTED",
+        "REQUESTED",
+        "WAITING",
+      ].includes(status)
+    ) {
+      sawPending = true;
+      continue;
+    }
+    if (
+      ["SUCCESS", "NEUTRAL", "SKIPPED", "STALE"].includes(conclusion) ||
+      ["SUCCESS", "NEUTRAL", "SKIPPED", "STALE"].includes(status)
+    ) {
+      sawSuccess = true;
+    }
   }
-  return sawKnown ? "success" : "unknown";
+  if (sawFailure) return "failure";
+  if (sawPending) return "pending";
+  return sawSuccess ? "success" : "unknown";
 }
 
 function checkStatusFromGraphql(
@@ -255,7 +294,7 @@ function checkStatusFromGraphql(
     return "failure";
   if (state === "SUCCESS") return "success";
   const contexts = asRecord(rollup.contexts);
-  return summarizeChecks(contexts?.nodes);
+  return summarizeChecks(contexts?.nodes ?? rollup.nodes);
 }
 
 function checkDetailsFrom(value: unknown): PullRequestResource["checkDetails"] {
@@ -283,12 +322,14 @@ function checkDetailsFrom(value: unknown): PullRequestResource["checkDetails"] {
         conclusion === "CANCELLED" ||
         conclusion === "TIMED_OUT" ||
         conclusion === "ACTION_REQUIRED" ||
+        conclusion === "STARTUP_FAILURE" ||
         [
           "FAILURE",
           "ERROR",
           "CANCELLED",
           "TIMED_OUT",
           "ACTION_REQUIRED",
+          "STARTUP_FAILURE",
         ].includes(status ?? "")
           ? "failure"
           : [
@@ -300,7 +341,12 @@ function checkDetailsFrom(value: unknown): PullRequestResource["checkDetails"] {
                 "WAITING",
               ].includes(status ?? "")
             ? "pending"
-            : conclusion === "SUCCESS" || status === "SUCCESS"
+            : ["SUCCESS", "NEUTRAL", "SKIPPED", "STALE"].includes(
+                  conclusion ?? "",
+                ) ||
+                ["SUCCESS", "NEUTRAL", "SKIPPED", "STALE"].includes(
+                  status ?? "",
+                )
               ? "success"
               : "unknown";
       return [{ name, status: normalized }];
