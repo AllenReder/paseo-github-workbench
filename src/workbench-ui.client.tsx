@@ -1599,6 +1599,7 @@ export function Workbench({
 export function useProjectRepositories(
   projectId: string | null,
   hostId: string,
+  initialRepository: string | null = null,
 ) {
   const paseo = usePaseo();
   const queryClient = useQueryClient();
@@ -1616,11 +1617,11 @@ export function useProjectRepositories(
       let cursor: string | undefined;
       for (let page = 0; page < 10; page += 1) {
         const response = await paseo.workspaces.list({
+          filter: { projectId },
           page: { limit: 200, ...(cursor ? { cursor } : {}) },
         });
         for (const workspace of response.entries) {
-          if (workspace.projectId !== projectId || workspace.archivingAt)
-            continue;
+          if (workspace.archivingAt) continue;
           const repository = normalizeGitHubRepository(
             workspace.gitRuntime?.remoteUrl,
           );
@@ -1636,5 +1637,15 @@ export function useProjectRepositories(
     const invalidate = () => queryClient.invalidateQueries({ queryKey });
     return paseo.workspaces.subscribe(invalidate);
   }, [paseo, queryClient, queryKey]);
-  return query.data ?? [];
+  return useMemo(() => {
+    const loaded = query.data ?? [];
+    if (!initialRepository) return loaded;
+    const initialLower = initialRepository.toLowerCase();
+    return [
+      initialRepository,
+      ...loaded.filter(
+        (repository) => repository.toLowerCase() !== initialLower,
+      ),
+    ];
+  }, [initialRepository, query.data]);
 }

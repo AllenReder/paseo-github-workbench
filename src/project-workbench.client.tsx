@@ -1,17 +1,34 @@
-import { type PluginWorkspacePanelProps, useWorkspace } from "@getpaseo/plugin";
-import { useEffect, useState } from "react";
+import {
+  type PluginWorkspacePanelProps,
+  usePaseo,
+  useWorkspace,
+} from "@getpaseo/plugin";
+import { useEffect, useMemo, useState } from "react";
 import { Text, View } from "react-native";
+import { normalizeGitHubRepository } from "./github-workbench.shared";
 import { I18nProvider, useTranslation } from "./i18n/context";
 import { useProjectRepositories, Workbench } from "./workbench-ui.client";
 
 function ProjectGitHubWorkbenchPanelInner(props: PluginWorkspacePanelProps) {
   const { t } = useTranslation();
+  const paseo = usePaseo();
   const workspace = useWorkspace(props.workspaceId, (item) => ({
     projectId: item.projectId,
   }));
+  const workspaceHandle = useMemo(
+    () => paseo.workspaces.ref(props.workspaceId),
+    [paseo, props.workspaceId],
+  );
+  // The plugin workspace snapshot intentionally omits git runtime details, but
+  // the client handle keeps the full descriptor locally after the workspace is
+  // opened. Use it as an immediate seed while the project-wide query loads.
+  const currentRepository = normalizeGitHubRepository(
+    workspaceHandle.current()?.gitRuntime?.remoteUrl,
+  );
   const repositories = useProjectRepositories(
     workspace?.projectId ?? null,
     props.host.id,
+    currentRepository,
   );
   const [repository, setRepository] = useState<string | null>(null);
   const selectedRepository = repository ?? repositories[0] ?? null;
