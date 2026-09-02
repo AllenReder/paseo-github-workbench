@@ -3,9 +3,7 @@ import { I18nProvider } from "./i18n/context";
 import { Workbench } from "./workbench-ui.client";
 
 function GitHubWorkbenchSurfaceInner(props: PluginSurfaceProps) {
-  return (
-    <Workbench {...props} scope={{ scope: "account" }} selectableProjects />
-  );
+  return <Workbench {...props} scope={{ scope: "account" }} />;
 }
 
 export function GitHubWorkbenchSurface(props: PluginSurfaceProps) {

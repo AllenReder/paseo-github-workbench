@@ -18,11 +18,9 @@ layouts, selecting a resource opens its detail view with a back control to
 return to the list.
 
 Use the All, Issues, PRs, Mine, and Review tabs to change the list context.
-The filter menu includes a project section: All account work is the default,
-and choosing a local Paseo project with a GitHub repository changes the
-workbench to that repository's scope. Account scope retains its repository
-filter; project scope does not duplicate it. The detail action opens an
-existing Paseo workspace or creates one when needed.
+The filter menu lets you filter by GitHub Status (Open, Merged, Closed),
+GitHub Repository, workflow stage, and ownership relationship. The
+detail action opens an existing Paseo workspace or creates one when needed.
 
 ## What it does
 

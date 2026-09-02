@@ -16,8 +16,7 @@ export const en: TranslationDictionary = {
     selectResource: "Select an issue or pull request to see its details.",
     backToList: "Back to list",
     filters: "Filters",
-    filterProject: "Project",
-    allAccountWork: "All account work",
+    filterStatus: "Status",
     filterWorkflow: "Workflow",
     filterOwnership: "Ownership",
     filterRepository: "Repository",
@@ -41,6 +40,11 @@ export const en: TranslationDictionary = {
     directionDesc: "Desc",
   },
   filters: {
+    status: {
+      open: "Open",
+      merged: "Merged",
+      closed: "Closed",
+    },
     kinds: {
       all: "All",
       pullRequest: "PRs",
@@ -76,6 +80,8 @@ export const en: TranslationDictionary = {
       assigned: "Assigned",
       draft: "Draft",
       open: "Open",
+      merged: "Merged",
+      closed: "Closed",
       noRelationship: "No relation",
       ciPassing: "CI passing",
       ciRunning: "CI running",

@@ -26,8 +26,7 @@ export type TranslationDictionary = {
     selectResource: string;
     backToList: string;
     filters: string;
-    filterProject: string;
-    allAccountWork: string;
+    filterStatus: string;
     filterWorkflow: string;
     filterOwnership: string;
     filterRepository: string;
@@ -51,6 +50,11 @@ export type TranslationDictionary = {
     directionDesc: string;
   };
   filters: {
+    status: {
+      open: string;
+      merged: string;
+      closed: string;
+    };
     kinds: {
       all: string;
       pullRequest: string;
@@ -86,6 +90,8 @@ export type TranslationDictionary = {
       assigned: string;
       draft: string;
       open: string;
+      merged: string;
+      closed: string;
       noRelationship: string;
       ciPassing: string;
       ciRunning: string;

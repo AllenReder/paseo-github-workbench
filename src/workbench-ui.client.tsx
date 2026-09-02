@@ -15,7 +15,7 @@ import {
   adjustPendingResourceCount,
   ensureResourceWorkspaceRpc,
   type GitHubResource,
-  listProjectCatalogRpc,
+  type LifecycleState,
   listResourcesRpc,
   mergeRefreshedResource,
   normalizeGitHubRepository,
@@ -35,11 +35,10 @@ type ResourceScope =
   | { scope: "repository"; repository: string };
 type WorkbenchProps = PluginSurfaceProps & {
   scope: ResourceScope;
-  selectableProjects?: boolean;
 };
 type ContentTab = "all" | "issue" | "pull-request" | "mine" | "review";
 type OwnershipFilter = "all" | "mine" | "assigned" | "review";
-
+type StatusFilter = LifecycleState;
 export function clampWorkbenchListWidth(
   availableWidth: number,
   requestedWidth: number,
@@ -149,6 +148,46 @@ function StatusBadge({
   theme: PluginHostProps["theme"];
 }) {
   const { t } = useTranslation();
+  if (resource.lifecycleState === "merged") {
+    return (
+      <View
+        style={{
+          borderColor: "#a371f7",
+          borderRadius: 99,
+          borderWidth: 1,
+          paddingHorizontal: 7,
+          paddingVertical: 2,
+        }}
+      >
+        <Text style={{ color: "#a371f7", fontSize: 10, fontWeight: "700" }}>
+          {t("resource.badges.merged")}
+        </Text>
+      </View>
+    );
+  }
+  if (resource.lifecycleState === "closed") {
+    return (
+      <View
+        style={{
+          borderColor: theme.colors.statusDanger,
+          borderRadius: 99,
+          borderWidth: 1,
+          paddingHorizontal: 7,
+          paddingVertical: 2,
+        }}
+      >
+        <Text
+          style={{
+            color: theme.colors.statusDanger,
+            fontSize: 10,
+            fontWeight: "700",
+          }}
+        >
+          {t("resource.badges.closed")}
+        </Text>
+      </View>
+    );
+  }
   const draft = resource.kind === "pull-request" && resource.isDraft;
   const color = draft
     ? theme.colors.foregroundMuted
@@ -724,38 +763,70 @@ function DetailPane({
     </ScrollView>
   );
 }
+function FilterIcon({ color }: { color: string }) {
+  return (
+    <View
+      style={{
+        alignItems: "center",
+        height: 16,
+        justifyContent: "center",
+        width: 16,
+      }}
+    >
+      <View
+        style={{
+          backgroundColor: color,
+          borderRadius: 1,
+          height: 2,
+          width: 16,
+        }}
+      />
+      <View
+        style={{
+          backgroundColor: color,
+          borderRadius: 1,
+          height: 2,
+          marginTop: 2,
+          width: 10,
+        }}
+      />
+      <View
+        style={{
+          backgroundColor: color,
+          borderRadius: 1,
+          height: 6,
+          marginTop: 2,
+          width: 3,
+        }}
+      />
+    </View>
+  );
+}
+
 function FilterPopover({
   theme,
+  status,
   bucket,
   ownership,
   repository,
   repositories,
-  projects,
-  projectId,
-  showProjectFilter,
   showRepositoryFilter,
+  setStatus,
   setBucket,
   setOwnership,
   setRepository,
-  setProjectId,
 }: {
   theme: PluginHostProps["theme"];
+  status: StatusFilter;
   bucket: ResourceClassification["bucket"] | "all";
   ownership: OwnershipFilter;
   repository: string | null;
   repositories: readonly string[];
-  projects: ReadonlyArray<{
-    projectId: string;
-    displayName: string;
-    repository: string | null;
-  }>;
-  projectId: string | null;
-  showProjectFilter: boolean;
   showRepositoryFilter: boolean;
+  setStatus: (value: StatusFilter) => void;
   setBucket: (value: ResourceClassification["bucket"] | "all") => void;
   setOwnership: (value: OwnershipFilter) => void;
   setRepository: (value: string | null) => void;
-  setProjectId: (value: string | null) => void;
 }) {
   const { t } = useTranslation();
   const button = (selected: boolean) => ({
@@ -766,6 +837,11 @@ function FilterPopover({
     paddingHorizontal: 8,
     paddingVertical: 4,
   });
+  const statusOptions: Array<{ key: StatusFilter; label: string }> = [
+    { key: "open", label: t("filters.status.open") },
+    { key: "merged", label: t("filters.status.merged") },
+    { key: "closed", label: t("filters.status.closed") },
+  ];
   const bucketOptions = [
     "all",
     "needs-attention",
@@ -781,11 +857,41 @@ function FilterPopover({
         borderColor: theme.colors.border,
         borderRadius: 7,
         borderWidth: 1,
+        elevation: 8,
         gap: 9,
         padding: 10,
+        shadowColor: "#000",
+        shadowOffset: { height: 4, width: 0 },
+        shadowOpacity: 0.28,
+        shadowRadius: 10,
       }}
     >
-      {showProjectFilter ? (
+      <Text
+        style={{
+          color: theme.colors.foregroundMuted,
+          fontSize: 11,
+          fontWeight: "700",
+        }}
+      >
+        {t("workbench.filterStatus")}
+      </Text>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+        {statusOptions.map((opt) => (
+          <Pressable
+            key={opt.key}
+            accessibilityRole="button"
+            accessibilityLabel={opt.label}
+            accessibilityState={{ selected: status === opt.key }}
+            onPress={() => setStatus(opt.key)}
+            style={button(status === opt.key)}
+          >
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+              {opt.label}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+      {showRepositoryFilter && repositories.length > 1 ? (
         <>
           <Text
             style={{
@@ -794,46 +900,39 @@ function FilterPopover({
               fontWeight: "700",
             }}
           >
-            {t("workbench.filterProject")}
+            {t("workbench.filterRepository")}
           </Text>
-          <ScrollView horizontal contentContainerStyle={{ gap: 6 }}>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={t("workbench.allAccountWork")}
-              accessibilityState={{ selected: projectId === null }}
-              onPress={() => setProjectId(null)}
-              style={button(projectId === null)}
+              accessibilityLabel={t("filters.kinds.all")}
+              accessibilityState={{ selected: repository === null }}
+              onPress={() => setRepository(null)}
+              style={button(repository === null)}
             >
               <Text
                 style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}
               >
-                {t("workbench.allAccountWork")}
+                {t("filters.kinds.all")}
               </Text>
             </Pressable>
-            {projects
-              .filter((project) => project.repository !== null)
-              .map((project) => (
-                <Pressable
-                  key={project.projectId}
-                  accessibilityRole="button"
-                  accessibilityLabel={`${project.displayName} · ${project.repository}`}
-                  accessibilityState={{
-                    selected: projectId === project.projectId,
-                  }}
-                  onPress={() => setProjectId(project.projectId)}
-                  style={button(projectId === project.projectId)}
+            {repositories.map((value) => (
+              <Pressable
+                key={value}
+                accessibilityRole="button"
+                accessibilityLabel={value}
+                accessibilityState={{ selected: repository === value }}
+                onPress={() => setRepository(value)}
+                style={button(repository === value)}
+              >
+                <Text
+                  style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}
                 >
-                  <Text
-                    style={{
-                      color: theme.colors.foregroundMuted,
-                      fontSize: 11,
-                    }}
-                  >
-                    {project.displayName}
-                  </Text>
-                </Pressable>
-              ))}
-          </ScrollView>
+                  {value}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
         </>
       ) : null}
       <Text
@@ -910,50 +1009,6 @@ function FilterPopover({
           </Pressable>
         ))}
       </View>
-      {showRepositoryFilter && repositories.length > 1 ? (
-        <>
-          <Text
-            style={{
-              color: theme.colors.foregroundMuted,
-              fontSize: 11,
-              fontWeight: "700",
-            }}
-          >
-            {t("workbench.filterRepository")}
-          </Text>
-          <ScrollView horizontal contentContainerStyle={{ gap: 6 }}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={t("filters.kinds.all")}
-              accessibilityState={{ selected: repository === null }}
-              onPress={() => setRepository(null)}
-              style={button(repository === null)}
-            >
-              <Text
-                style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}
-              >
-                {t("filters.kinds.all")}
-              </Text>
-            </Pressable>
-            {repositories.map((value) => (
-              <Pressable
-                key={value}
-                accessibilityRole="button"
-                accessibilityLabel={value}
-                accessibilityState={{ selected: repository === value }}
-                onPress={() => setRepository(value)}
-                style={button(repository === value)}
-              >
-                <Text
-                  style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}
-                >
-                  {value}
-                </Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-        </>
-      ) : null}
     </View>
   );
 }
@@ -964,7 +1019,6 @@ export function Workbench({
   host,
   navigation,
   scope,
-  selectableProjects = false,
 }: WorkbenchProps) {
   const { t } = useTranslation();
   const listResources = useRpc(listResourcesRpc);
@@ -975,12 +1029,12 @@ export function Workbench({
   const [tab, setTab] = useState<ContentTab>("all");
   const [search, setSearch] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
+  const [status, setStatus] = useState<StatusFilter>("open");
   const [bucket, setBucket] = useState<
     ResourceClassification["bucket"] | "all"
   >("all");
   const [ownership, setOwnership] = useState<OwnershipFilter>("all");
   const [repository, setRepository] = useState<string | null>(null);
-  const [projectId, setProjectId] = useState<string | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [refreshingKey, setRefreshingKey] = useState<string | null>(null);
   const [pendingCounts, setPendingCounts] = useState(
@@ -991,42 +1045,23 @@ export function Workbench({
   const dragStartWidth = useRef(0);
   const dragStartPageX = useRef(0);
   const directory = usePaseoDirectory(host.id);
-  const listProjectCatalog = useRpc(listProjectCatalogRpc);
-  const catalog = useQuery({
-    queryKey: ["github-workbench", host.id, "project-catalog"],
-    enabled: selectableProjects,
-    queryFn: () => listProjectCatalog({}),
-    staleTime: 30_000,
-  });
-  const projects = catalog.data?.projects ?? [];
-  const selectedProject = projects.find(
-    (project) => project.projectId === projectId,
-  );
-  const effectiveScope: ResourceScope =
-    selectableProjects && selectedProject?.repository
-      ? { scope: "repository", repository: selectedProject.repository }
-      : scope;
   const queryKey = [
     "github-workbench",
     host.id,
-    effectiveScope.scope,
-    effectiveScope.scope === "repository" ? effectiveScope.repository : null,
+    scope.scope,
+    scope.scope === "repository" ? scope.repository : null,
+    status,
   ] as const;
   const scopeKey =
-    effectiveScope.scope === "repository"
-      ? `repository:${effectiveScope.repository}`
-      : "account";
-  useEffect(() => {
-    if (projectId && !selectedProject) setProjectId(null);
-  }, [projectId, selectedProject]);
+    scope.scope === "repository" ? `repository:${scope.repository}` : "account";
   const query = useQuery({
     queryKey,
     refetchInterval: 60_000,
     queryFn: () =>
       listResources(
-        effectiveScope.scope === "repository"
-          ? { scope: "repository", repository: effectiveScope.repository }
-          : { scope: "account" },
+        scope.scope === "repository"
+          ? { scope: "repository", repository: scope.repository, state: status }
+          : { scope: "account", state: status },
       ),
   });
   const index = useMemo(
@@ -1066,6 +1101,7 @@ export function Workbench({
               : tab === "pull-request" || tab === "review"
                 ? "pull-request"
                 : "all",
+          lifecycleState: status,
           bucket,
           label: null,
           milestone: null,
@@ -1086,7 +1122,7 @@ export function Workbench({
             ) &&
             !(ownership === "assigned" && !resource.isAssignedToMe),
         ),
-    [bucket, index, ownership, repository, search, tab],
+    [bucket, index, ownership, repository, search, status, tab],
   );
   const selected =
     rows.find((item) => item.resource.key === selectedKey)?.resource ?? null;
@@ -1116,18 +1152,19 @@ export function Workbench({
         queryKey: [...queryKey, "forced"],
         queryFn: () =>
           listResources(
-            effectiveScope.scope === "repository"
+            scope.scope === "repository"
               ? {
                   scope: "repository",
-                  repository: effectiveScope.repository,
+                  repository: scope.repository,
+                  state: status,
                   forceRefresh: true,
                 }
-              : { scope: "account", forceRefresh: true },
+              : { scope: "account", state: status, forceRefresh: true },
           ),
       })
       .then(() => query.refetch())
       .catch(() => undefined);
-  }, [effectiveScope, listResources, query, queryClient, queryKey]);
+  }, [listResources, query, queryClient, queryKey, scope, status]);
   const refreshItem = useCallback(
     (resource: GitHubResource) => {
       setRefreshingKey(resource.key);
@@ -1240,43 +1277,72 @@ export function Workbench({
           borderBottomWidth: 1,
           gap: 12,
           padding: layout.compact ? 12 : 16,
+          position: "relative",
+          zIndex: filterOpen ? 20 : 1,
         }}
       >
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={{ gap: 4 }}
+        <View
+          style={{
+            alignItems: "center",
+            flexDirection: "row",
+            justifyContent: "space-between",
+          }}
         >
-          {tabs.map(({ key, label }) => (
-            <Pressable
-              key={key}
-              accessibilityRole="button"
-              accessibilityState={{ selected: tab === key }}
-              onPress={() => setTab(key)}
-              style={{
-                borderBottomColor:
-                  tab === key ? theme.colors.accent : "transparent",
-                borderBottomWidth: 2,
-                paddingHorizontal: 7,
-                paddingVertical: 5,
-              }}
-            >
-              <Text
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ gap: 4 }}
+            style={{ flex: 1 }}
+          >
+            {tabs.map(({ key, label }) => (
+              <Pressable
+                key={key}
+                accessibilityRole="button"
+                accessibilityState={{ selected: tab === key }}
+                onPress={() => setTab(key)}
                 style={{
-                  color:
-                    tab === key
-                      ? theme.colors.foreground
-                      : theme.colors.foregroundMuted,
-                  fontSize: 12,
-                  fontWeight: tab === key ? "700" : "500",
+                  borderBottomColor:
+                    tab === key ? theme.colors.accent : "transparent",
+                  borderBottomWidth: 2,
+                  paddingHorizontal: 7,
+                  paddingVertical: 5,
                 }}
               >
-                {label} ({count(key)})
-              </Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-        <View style={{ alignItems: "center", flexDirection: "row", gap: 8 }}>
+                <Text
+                  style={{
+                    color:
+                      tab === key
+                        ? theme.colors.foreground
+                        : theme.colors.foregroundMuted,
+                    fontSize: 12,
+                    fontWeight: tab === key ? "700" : "500",
+                  }}
+                >
+                  {label} ({count(key)})
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t("workbench.refresh")}
+            onPress={refresh}
+            style={{ paddingHorizontal: 3, paddingVertical: 5 }}
+          >
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 15 }}>
+              ↻
+            </Text>
+          </Pressable>
+        </View>
+        <View
+          style={{
+            alignItems: "center",
+            flexDirection: "row",
+            gap: 8,
+            position: "relative",
+            zIndex: filterOpen ? 20 : 1,
+          }}
+        >
           <TextInput
             accessibilityLabel={t("workbench.searchAriaLabel")}
             value={search}
@@ -1298,50 +1364,51 @@ export function Workbench({
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={t("workbench.filters")}
+            accessibilityState={{ expanded: filterOpen }}
             onPress={() => setFilterOpen((open) => !open)}
             style={{
+              alignItems: "center",
               backgroundColor: filterOpen
                 ? theme.colors.surface2
                 : theme.colors.surface1,
               borderColor: theme.colors.border,
               borderRadius: 7,
               borderWidth: 1,
-              paddingHorizontal: 10,
-              paddingVertical: 9,
+              height: 36,
+              justifyContent: "center",
+              width: 36,
             }}
           >
-            <Text style={{ color: theme.colors.foreground, fontSize: 13 }}>
-              ☷
-            </Text>
+            <FilterIcon color={theme.colors.foreground} />
           </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={t("workbench.refresh")}
-            onPress={refresh}
-            style={{ paddingHorizontal: 3, paddingVertical: 8 }}
-          >
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 15 }}>
-              ↻
-            </Text>
-          </Pressable>
+          {filterOpen ? (
+            <View
+              style={{
+                elevation: 10,
+                maxWidth: "100%",
+                position: "absolute",
+                right: 0,
+                top: 42,
+                width: layout.compact ? "100%" : 408,
+                zIndex: 30,
+              }}
+            >
+              <FilterPopover
+                theme={theme}
+                status={status}
+                bucket={bucket}
+                ownership={ownership}
+                repository={repository}
+                repositories={repositories}
+                showRepositoryFilter={scope.scope === "account"}
+                setStatus={setStatus}
+                setBucket={setBucket}
+                setOwnership={setOwnership}
+                setRepository={setRepository}
+              />
+            </View>
+          ) : null}
         </View>
-        {filterOpen ? (
-          <FilterPopover
-            theme={theme}
-            bucket={bucket}
-            ownership={ownership}
-            repository={repository}
-            repositories={repositories}
-            projects={projects}
-            projectId={projectId}
-            showProjectFilter={selectableProjects}
-            showRepositoryFilter={effectiveScope.scope === "account"}
-            setBucket={setBucket}
-            setOwnership={setOwnership}
-            setRepository={setRepository}
-            setProjectId={setProjectId}
-          />
-        ) : null}
         <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
           {t("summary.total", { count: rows.length })}
         </Text>

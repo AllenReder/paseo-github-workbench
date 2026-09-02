@@ -59,13 +59,13 @@ describe("i18n translations and fallback", () => {
   const tZh = createTranslator("zh-CN");
 
   test("provides English translation for known keys", () => {
-    expect(tEn("workbench.filterProject")).toBe("Project");
+    expect(tEn("workbench.filterStatus")).toBe("Status");
     expect(tEn("filters.kinds.pullRequest")).toBe("PRs");
     expect(tEn("resource.actions.createWorkspace")).toBe("Create workspace");
   });
 
   test("provides Chinese translation for known keys", () => {
-    expect(tZh("workbench.filterProject")).toBe("项目");
+    expect(tZh("workbench.filterStatus")).toBe("GitHub 状态");
     expect(tZh("filters.kinds.pullRequest")).toBe("PR");
     expect(tZh("resource.actions.createWorkspace")).toBe("创建工作区");
   });

@@ -2,6 +2,7 @@ import type {
   AgentSummary,
   GitHubResource,
   IssueResource,
+  LifecycleState,
   PullRequestResource,
   ResourceKind,
 } from "./github-workbench.shared";
@@ -41,7 +42,14 @@ export type PaseoDirectorySnapshot = {
 };
 
 export type ResourceClassification = {
-  bucket: "needs-attention" | "being-handled" | "waiting" | "ready" | "open";
+  bucket:
+    | "needs-attention"
+    | "being-handled"
+    | "waiting"
+    | "ready"
+    | "open"
+    | "merged"
+    | "closed";
   reason: string;
 };
 
@@ -85,6 +93,7 @@ export type ResourceIndex = {
     focusKey: string | null;
     quickFilter: QuickResourceFilter;
     kind: ResourceKind | "all";
+    lifecycleState?: LifecycleState | "all";
     bucket: ResourceClassification["bucket"] | "all";
     label: string | null;
     milestone: MilestoneFilter;
@@ -104,8 +113,9 @@ const RESOURCE_BUCKET_ORDER: Record<ResourceClassification["bucket"], number> =
     ready: 2,
     waiting: 3,
     open: 4,
+    merged: 5,
+    closed: 6,
   };
-
 function activeAgent(
   agents: readonly AgentSummary[],
 ): AgentSummary | undefined {
@@ -136,6 +146,12 @@ function activeAgent(
 function classifyPullRequest(
   resource: PullRequestResource,
 ): ResourceClassification {
+  if (resource.lifecycleState === "merged") {
+    return { bucket: "merged", reason: "Merged PR" };
+  }
+  if (resource.lifecycleState === "closed") {
+    return { bucket: "closed", reason: "Closed PR" };
+  }
   const agent = activeAgent(resource.agents);
   if (
     agent &&
@@ -189,6 +205,9 @@ function classifyPullRequest(
 }
 
 function classifyIssue(resource: IssueResource): ResourceClassification {
+  if (resource.lifecycleState === "closed") {
+    return { bucket: "closed", reason: "Closed issue" };
+  }
   const agent = activeAgent(resource.agents);
   if (
     agent &&
@@ -398,6 +417,7 @@ export function createResourceIndex(
     focusKey: string | null;
     quickFilter: QuickResourceFilter;
     kind: ResourceKind | "all";
+    lifecycleState?: LifecycleState | "all";
     bucket: ResourceClassification["bucket"] | "all";
     label: string | null;
     milestone: MilestoneFilter;
@@ -445,6 +465,12 @@ export function createResourceIndex(
       )
         continue;
       if (criteria.kind !== "all" && res.kind !== criteria.kind) continue;
+      if (
+        criteria.lifecycleState &&
+        criteria.lifecycleState !== "all" &&
+        res.lifecycleState !== criteria.lifecycleState
+      )
+        continue;
       if (
         criteria.bucket !== "all" &&
         item.classification.bucket !== criteria.bucket

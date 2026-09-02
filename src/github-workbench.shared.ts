@@ -4,6 +4,8 @@ import { z } from "zod";
 export const ResourceKindSchema = z.enum(["pull-request", "issue"]);
 export type ResourceKind = z.infer<typeof ResourceKindSchema>;
 
+export const LifecycleStateSchema = z.enum(["open", "merged", "closed"]);
+export type LifecycleState = z.infer<typeof LifecycleStateSchema>;
 export const ChecksStatusSchema = z.enum([
   "success",
   "pending",
@@ -37,6 +39,9 @@ const ResourceBaseSchema = z.object({
   labels: z.array(z.string()),
   createdAt: z.string(),
   updatedAt: z.string(),
+  closedAt: z.string().nullable().default(null),
+  state: z.enum(["OPEN", "CLOSED", "MERGED"]).default("OPEN"),
+  lifecycleState: LifecycleStateSchema.default("open"),
   isMine: z.boolean(),
   isAssignedToMe: z.boolean(),
   workspaceIds: z.array(z.string()),
@@ -55,6 +60,7 @@ export const PullRequestResourceSchema = ResourceBaseSchema.extend({
   isDraft: z.boolean(),
   headRefName: z.string().nullable(),
   baseRefName: z.string().nullable(),
+  mergedAt: z.string().nullable().default(null),
   checksStatus: ChecksStatusSchema,
   checkDetails: z.array(PullRequestCheckSchema).default([]),
   commentCount: z.number().int().nonnegative(),
@@ -101,6 +107,7 @@ export const listResourcesRpc = defineRpc({
         .string()
         .regex(/^[^/\s]+\/[^/\s]+$/)
         .optional(),
+      state: LifecycleStateSchema.default("open").optional(),
       forceRefresh: z.boolean().optional(),
     })
     .superRefine((value, context) => {

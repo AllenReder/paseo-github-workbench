@@ -15,8 +15,7 @@ export const zhCN: TranslationDictionary = {
     selectResource: "选择一个 Issue 或 Pull Request 以查看详情。",
     backToList: "返回列表",
     filters: "筛选",
-    filterProject: "项目",
-    allAccountWork: "所有账户工作",
+    filterStatus: "GitHub 状态",
     filterWorkflow: "工作流",
     filterOwnership: "归属",
     filterRepository: "仓库",
@@ -40,6 +39,11 @@ export const zhCN: TranslationDictionary = {
     directionDesc: "降序",
   },
   filters: {
+    status: {
+      open: "未关闭",
+      merged: "已合并",
+      closed: "已关闭",
+    },
     kinds: {
       all: "全部",
       pullRequest: "PR",
@@ -75,6 +79,8 @@ export const zhCN: TranslationDictionary = {
       assigned: "已指派",
       draft: "草稿",
       open: "开放",
+      merged: "已合并",
+      closed: "已关闭",
       noRelationship: "无账户关联",
       ciPassing: "CI 通过",
       ciRunning: "CI 运行中",
