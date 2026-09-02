@@ -223,6 +223,15 @@ describe("GitHub workbench shared primitives", () => {
     });
 
     expect(isGitHubResourceDetailStale(summary, detail)).toBe(true);
+    expect(
+      isGitHubResourceDetailStale(
+        summary,
+        pullRequest({
+          updatedAt: "2026-02-02T00:00:00Z",
+          checksStatus: "pending",
+        }),
+      ),
+    ).toBe(false);
   });
 
   test("formats accessibility labels properly", () => {

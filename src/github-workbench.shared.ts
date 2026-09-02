@@ -324,6 +324,7 @@ export function isGitHubResourceDetailStale(
 ): boolean {
   if (summary.key !== detail.key || summary.kind !== detail.kind) return true;
   if (detail.updatedAt < summary.updatedAt) return true;
+  if (detail.updatedAt > summary.updatedAt) return false;
   return summary.kind === "pull-request" && detail.kind === "pull-request"
     ? detail.checksStatus !== summary.checksStatus
     : false;
