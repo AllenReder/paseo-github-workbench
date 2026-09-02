@@ -1,5 +1,7 @@
 # Paseo GitHub Workbench
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 GitHub Workbench is a [Paseo](https://github.com/getpaseo/paseo) plugin for
 working with GitHub issues and pull requests without leaving Paseo.
 
