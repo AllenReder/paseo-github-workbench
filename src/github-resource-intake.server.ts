@@ -78,8 +78,6 @@ query Workbench($authoredPr: String!, $reviewPr: String!, $authoredIssue: String
   assignedIssue: search(query: $assignedIssue, type: ISSUE, first: 100) { nodes { ... on Issue { ${issueSummarySelection} } } }
 }`;
 
-const viewerQuery = `query WorkbenchViewer { viewer { login } }`;
-
 const repositoryQuery = `
 query WorkbenchRepository($owner: String!, $name: String!, $pullRequestState: PullRequestState!, $issueState: IssueState!, $includeIssues: Boolean!) {
   repository(owner: $owner, name: $name) {
@@ -506,8 +504,6 @@ export function createGitHubResourceIntake(
     { value: CacheValue; expiresAt: number; staleUntil: number }
   >();
   const inFlight = new Map<string, Promise<CacheValue>>();
-  const viewerLogins = new Map<string, { value: string; expiresAt: number }>();
-  const viewerInFlight = new Map<string, Promise<string>>();
   const token =
     options.token === undefined
       ? environmentToken()
@@ -571,32 +567,6 @@ export function createGitHubResourceIntake(
     }
   }
 
-  async function getViewerLogin(): Promise<string> {
-    const cached = viewerLogins.get("github.com");
-    if (cached && cached.expiresAt > Date.now()) return cached.value;
-    const running = viewerInFlight.get("github.com");
-    if (running) return running;
-    const request = (async () => {
-      try {
-        const result = await graphql(viewerQuery, {});
-        const login = asString(asRecord(result.data.viewer)?.login) ?? "";
-        if (!login)
-          throw new Error(
-            result.error ?? "GitHub returned no authenticated login.",
-          );
-        viewerLogins.set("github.com", {
-          value: login,
-          expiresAt: Date.now() + CACHE_TTL_MS,
-        });
-        return login;
-      } finally {
-        viewerInFlight.delete("github.com");
-      }
-    })();
-    viewerInFlight.set("github.com", request);
-    return request;
-  }
-
   async function repositoryResources(
     repository: string,
     state: "open" | "merged" | "closed" = "open",
@@ -647,7 +617,6 @@ export function createGitHubResourceIntake(
   async function accountResources(
     state: "open" | "merged" | "closed" = "open",
   ): Promise<ResourceLoad> {
-    const viewer = await getViewerLogin();
     const prQualifier =
       state === "open"
         ? "is:open"
@@ -656,16 +625,16 @@ export function createGitHubResourceIntake(
           : "is:closed -is:merged";
     const issueQualifier = state === "closed" ? "is:closed" : "is:open";
     const result = await graphql(accountQuery, {
-      authoredPr: `is:pr ${prQualifier} author:${viewer}`,
-      reviewPr: `is:pr ${prQualifier} review-requested:${viewer}`,
+      authoredPr: `is:pr ${prQualifier} author:@me`,
+      reviewPr: `is:pr ${prQualifier} review-requested:@me`,
       authoredIssue:
         state === "merged"
           ? "is:issue is:closed author:__none__"
-          : `is:issue ${issueQualifier} author:${viewer}`,
+          : `is:issue ${issueQualifier} author:@me`,
       assignedIssue:
         state === "merged"
           ? "is:issue is:closed assignee:__none__"
-          : `is:issue ${issueQualifier} assignee:${viewer}`,
+          : `is:issue ${issueQualifier} assignee:@me`,
     });
     const root = result.data;
     const connectionNames = [

@@ -226,7 +226,7 @@ describe("GitHubResourceIntake", () => {
     expect(stale.warnings.at(-1)?.code).toBe("github-query-failed");
   });
 
-  it("handles account scope, resolves viewer, and merges relationship flags", async () => {
+  it("handles account scope with @me qualifiers and merges relationship flags", async () => {
     const intake = createGitHubResourceIntake(async (args) => {
       if (args[0] === "api" && args[1] === "graphql") {
         const queryArg =
@@ -254,12 +254,11 @@ describe("GitHubResourceIntake", () => {
         expect(hadOpenBrace).toBe(true);
         expect(braceDepth).toBe(0);
 
-        if (rawQuery.includes("WorkbenchViewer")) {
-          return {
-            stdout: JSON.stringify({ data: { viewer: { login: "octocat" } } }),
-            stderr: "",
-          };
-        }
+        expect(rawQuery).not.toContain("WorkbenchViewer");
+        expect(args).toContain("authoredPr=is:pr is:open author:@me");
+        expect(args).toContain("reviewPr=is:pr is:open review-requested:@me");
+        expect(args).toContain("authoredIssue=is:issue is:open author:@me");
+        expect(args).toContain("assignedIssue=is:issue is:open assignee:@me");
 
         return {
           stdout: JSON.stringify({
