@@ -42,6 +42,10 @@ type OwnershipFilter = "all" | "mine" | "assigned" | "review";
 type StatusFilter = LifecycleState;
 const WORKBENCH_STALE_TIME_MS = 5 * 60_000;
 const RESOURCE_DETAIL_STALE_TIME_MS = 10 * 60_000;
+
+function resourceDetailQueryKey(hostId: string, resourceKey: string | null) {
+  return ["github-workbench", hostId, "resource-detail", resourceKey] as const;
+}
 export function clampWorkbenchListWidth(
   availableWidth: number,
   requestedWidth: number,
@@ -397,6 +401,8 @@ function DetailPane({
   onEnsure,
   onRefresh,
   refreshing,
+  detailLoading,
+  detailError,
   onBack,
 }: {
   resource: GitHubResource | null;
@@ -406,6 +412,8 @@ function DetailPane({
   onEnsure: (resource: GitHubResource) => void;
   onRefresh: (resource: GitHubResource) => void;
   refreshing: boolean;
+  detailLoading?: boolean;
+  detailError?: string | null;
   onBack?: () => void;
 }) {
   const { t } = useTranslation();
@@ -629,6 +637,16 @@ function DetailPane({
         </View>
       ) : null}
       <View style={{ backgroundColor: theme.colors.border, height: 1 }} />
+      {detailLoading ? (
+        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+          {t("workbench.loading")}
+        </Text>
+      ) : null}
+      {detailError ? (
+        <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>
+          {detailError}
+        </Text>
+      ) : null}
       <Body body={resource.body} theme={theme} />
       {resource.kind === "pull-request" ? (
         <View style={{ gap: 7 }}>
@@ -1132,12 +1150,7 @@ export function Workbench({
   const selected =
     rows.find((item) => item.resource.key === selectedKey)?.resource ?? null;
   const selectedDetailQuery = useQuery({
-    queryKey: [
-      "github-workbench",
-      host.id,
-      "resource-detail",
-      selected?.key ?? null,
-    ],
+    queryKey: resourceDetailQueryKey(host.id, selected?.key ?? null),
     enabled: selected !== null,
     staleTime: RESOURCE_DETAIL_STALE_TIME_MS,
     queryFn: async () => {
@@ -1153,6 +1166,25 @@ export function Workbench({
     selected && selectedDetailQuery.data?.resource
       ? mergeRefreshedResource(selected, selectedDetailQuery.data.resource)
       : selected;
+  const selectedResourceKey = selected?.key ?? null;
+  const lastListRefreshRef = useRef<string | null>(null);
+  useEffect(() => {
+    const refreshedAt = query.data?.refreshedAt;
+    if (!refreshedAt) return;
+    const previousRefreshedAt = lastListRefreshRef.current;
+    lastListRefreshRef.current = refreshedAt;
+    if (
+      !selectedResourceKey ||
+      previousRefreshedAt === null ||
+      previousRefreshedAt === refreshedAt
+    ) {
+      return;
+    }
+    void queryClient.invalidateQueries({
+      queryKey: resourceDetailQueryKey(host.id, selectedResourceKey),
+      refetchType: "active",
+    });
+  }, [host.id, query.data?.refreshedAt, queryClient, selectedResourceKey]);
   useEffect(() => {
     if (
       selectedKey &&
@@ -1184,12 +1216,31 @@ export function Workbench({
           }
         : { scope: "account", state: status, forceRefresh: true },
     )
-      .then((data) => queryClient.setQueryData(queryKey, data))
+      .then((data) => {
+        queryClient.setQueryData(queryKey, data);
+        if (selectedResourceKey) {
+          void queryClient.invalidateQueries({
+            queryKey: resourceDetailQueryKey(host.id, selectedResourceKey),
+            refetchType: "active",
+          });
+        }
+      })
       .catch(() => undefined);
-  }, [listResources, queryClient, queryKey, scope, status]);
+  }, [
+    host.id,
+    listResources,
+    queryClient,
+    queryKey,
+    scope,
+    selectedResourceKey,
+    status,
+  ]);
   const refreshItem = useCallback(
     (resource: GitHubResource) => {
       setRefreshingKey(resource.key);
+      void queryClient.cancelQueries({
+        queryKey: resourceDetailQueryKey(host.id, resource.key),
+      });
       refreshResource({
         kind: resource.kind,
         repository: resource.repository,
@@ -1211,7 +1262,7 @@ export function Workbench({
                 : current,
           );
           queryClient.setQueryData(
-            ["github-workbench", host.id, "resource-detail", resource.key],
+            resourceDetailQueryKey(host.id, resource.key),
             { resource: refreshed },
           );
           setRefreshingKey(null);
@@ -1503,7 +1554,19 @@ export function Workbench({
           resource={selectedForDetail}
           theme={theme}
           navigation={navigation}
-          refreshing={refreshingKey === selected?.key}
+          refreshing={
+            refreshingKey === selected?.key || selectedDetailQuery.isFetching
+          }
+          detailLoading={
+            selectedDetailQuery.isFetching && !selectedDetailQuery.data
+          }
+          detailError={
+            selectedDetailQuery.error instanceof Error
+              ? selectedDetailQuery.error.message
+              : selectedDetailQuery.error
+                ? t("workbench.unableToLoad")
+                : null
+          }
           onRefresh={refreshItem}
           ensuring={
             selected ? (pendingCounts.get(selected.key) ?? 0) > 0 : false
@@ -1525,7 +1588,20 @@ export function Workbench({
               resource={selectedForDetail}
               theme={theme}
               navigation={navigation}
-              refreshing={refreshingKey === selected?.key}
+              refreshing={
+                refreshingKey === selected?.key ||
+                selectedDetailQuery.isFetching
+              }
+              detailLoading={
+                selectedDetailQuery.isFetching && !selectedDetailQuery.data
+              }
+              detailError={
+                selectedDetailQuery.error instanceof Error
+                  ? selectedDetailQuery.error.message
+                  : selectedDetailQuery.error
+                    ? t("workbench.unableToLoad")
+                    : null
+              }
               onRefresh={refreshItem}
               ensuring={
                 selected ? (pendingCounts.get(selected.key) ?? 0) > 0 : false
@@ -1609,7 +1685,20 @@ export function Workbench({
               resource={selectedForDetail}
               theme={theme}
               navigation={navigation}
-              refreshing={refreshingKey === selected?.key}
+              refreshing={
+                refreshingKey === selected?.key ||
+                selectedDetailQuery.isFetching
+              }
+              detailLoading={
+                selectedDetailQuery.isFetching && !selectedDetailQuery.data
+              }
+              detailError={
+                selectedDetailQuery.error instanceof Error
+                  ? selectedDetailQuery.error.message
+                  : selectedDetailQuery.error
+                    ? t("workbench.unableToLoad")
+                    : null
+              }
               onRefresh={refreshItem}
               ensuring={
                 selected ? (pendingCounts.get(selected.key) ?? 0) > 0 : false
