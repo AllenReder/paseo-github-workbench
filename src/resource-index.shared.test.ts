@@ -240,6 +240,16 @@ describe("ResourceIndex", () => {
           updatedAt: "2026-02-05T00:00:00Z",
           labels: { "github-workbench.resource": pr1.key }, // matched by BOTH label and workspace
         },
+        {
+          id: "agent-2",
+          title: "Direct resource agent",
+          status: "idle" as const,
+          requiresAttention: false,
+          attentionReason: null,
+          pendingPermissions: 0,
+          updatedAt: "2026-02-05T00:00:00Z",
+          labels: { "github-workbench.resource": pr1.key },
+        },
       ],
     };
 
@@ -247,8 +257,11 @@ describe("ResourceIndex", () => {
     const item = index.get(pr1.key);
     expect(item?.workspaceIds).toEqual(["ws-1"]);
     expect(item?.workspaceNames).toEqual(["pr-10"]);
-    expect(item?.agents).toHaveLength(1);
-    expect(item?.agents[0].id).toBe("agent-1");
+    expect(item?.agents).toHaveLength(2);
+    expect(item?.agents.map((agent) => agent.id)).toEqual([
+      "agent-1",
+      "agent-2",
+    ]);
 
     const queryResult = index.query({
       focusKey: null,

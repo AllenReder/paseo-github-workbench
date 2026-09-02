@@ -342,6 +342,8 @@ export function createResourceIndex(
 ): ResourceIndex {
   // 1. Enrich resources with directory data if available
   const workspacesByRepo = new Map<string, WorkspaceSnapshot[]>();
+  const agentsByWorkspaceId = new Map<string, AgentSnapshot[]>();
+  const agentsByResourceId = new Map<string, AgentSnapshot[]>();
   if (directory) {
     for (const ws of directory.workspaces) {
       if (ws.archivingAt) continue;
@@ -353,6 +355,25 @@ export function createResourceIndex(
         workspacesByRepo.set(repo, list);
       }
       list.push(ws);
+    }
+    for (const agent of directory.agents) {
+      if (agent.workspaceId) {
+        let agents = agentsByWorkspaceId.get(agent.workspaceId);
+        if (!agents) {
+          agents = [];
+          agentsByWorkspaceId.set(agent.workspaceId, agents);
+        }
+        agents.push(agent);
+      }
+      const resourceId = agent.labels["github-workbench.resource"];
+      if (resourceId) {
+        let agents = agentsByResourceId.get(resourceId);
+        if (!agents) {
+          agents = [];
+          agentsByResourceId.set(resourceId, agents);
+        }
+        agents.push(agent);
+      }
     }
   }
 
@@ -373,20 +394,10 @@ export function createResourceIndex(
       resource.repository,
       resource.number,
     );
-    const matchingWorkspaceIdSet = new Set(
-      matchingWorkspaces.map((ws) => ws.id),
-    );
-
-    const matchedAgents = directory.agents.filter(
-      (agent) =>
-        agent.labels["github-workbench.resource"] === resourceId ||
-        (agent.workspaceId && matchingWorkspaceIdSet.has(agent.workspaceId)),
-    );
-
     const agentSummaries: AgentSummary[] = [];
     const seenAgentIds = new Set<string>();
-    for (const agent of matchedAgents) {
-      if (seenAgentIds.has(agent.id)) continue;
+    const appendAgent = (agent: AgentSnapshot) => {
+      if (seenAgentIds.has(agent.id)) return;
       seenAgentIds.add(agent.id);
       agentSummaries.push({
         id: agent.id,
@@ -397,6 +408,14 @@ export function createResourceIndex(
         pendingPermissions: agent.pendingPermissions,
         updatedAt: agent.updatedAt,
       });
+    };
+    for (const agent of agentsByResourceId.get(resourceId) ?? []) {
+      appendAgent(agent);
+    }
+    for (const workspace of matchingWorkspaces) {
+      for (const agent of agentsByWorkspaceId.get(workspace.id) ?? []) {
+        appendAgent(agent);
+      }
     }
 
     return {
