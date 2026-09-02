@@ -7,6 +7,7 @@ import {
   applyAgentUpdate,
   applyWorkspaceUpdate,
   createResourceIndex,
+  type PaseoDirectorySnapshot,
 } from "./resource-index.shared";
 
 describe("ResourceIndex", () => {
@@ -214,7 +215,7 @@ describe("ResourceIndex", () => {
     });
   });
   it("enriches resources with workspaces and deduplicates directory agents", () => {
-    const directory = {
+    const directory: PaseoDirectorySnapshot = {
       workspaces: [
         {
           id: "ws-1",
@@ -229,6 +230,17 @@ describe("ResourceIndex", () => {
         },
       ],
       agents: [
+        {
+          id: "agent-0",
+          workspaceId: "ws-1",
+          title: "Workspace agent first",
+          status: "idle" as const,
+          requiresAttention: false,
+          attentionReason: null,
+          pendingPermissions: 0,
+          updatedAt: "2026-02-05T00:00:00Z",
+          labels: {},
+        },
         {
           id: "agent-1",
           workspaceId: "ws-1",
@@ -257,8 +269,9 @@ describe("ResourceIndex", () => {
     const item = index.get(pr1.key);
     expect(item?.workspaceIds).toEqual(["ws-1"]);
     expect(item?.workspaceNames).toEqual(["pr-10"]);
-    expect(item?.agents).toHaveLength(2);
+    expect(item?.agents).toHaveLength(3);
     expect(item?.agents.map((agent) => agent.id)).toEqual([
+      "agent-0",
       "agent-1",
       "agent-2",
     ]);

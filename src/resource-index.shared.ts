@@ -344,6 +344,7 @@ export function createResourceIndex(
   const workspacesByRepo = new Map<string, WorkspaceSnapshot[]>();
   const agentsByWorkspaceId = new Map<string, AgentSnapshot[]>();
   const agentsByResourceId = new Map<string, AgentSnapshot[]>();
+  const agentDirectoryOrder = new Map<string, number>();
   if (directory) {
     for (const ws of directory.workspaces) {
       if (ws.archivingAt) continue;
@@ -356,7 +357,8 @@ export function createResourceIndex(
       }
       list.push(ws);
     }
-    for (const agent of directory.agents) {
+    for (const [index, agent] of directory.agents.entries()) {
+      agentDirectoryOrder.set(agent.id, index);
       if (agent.workspaceId) {
         let agents = agentsByWorkspaceId.get(agent.workspaceId);
         if (!agents) {
@@ -409,13 +411,17 @@ export function createResourceIndex(
         updatedAt: agent.updatedAt,
       });
     };
-    for (const agent of agentsByResourceId.get(resourceId) ?? []) {
-      appendAgent(agent);
-    }
+    const candidateAgents = [...(agentsByResourceId.get(resourceId) ?? [])];
     for (const workspace of matchingWorkspaces) {
-      for (const agent of agentsByWorkspaceId.get(workspace.id) ?? []) {
-        appendAgent(agent);
-      }
+      candidateAgents.push(...(agentsByWorkspaceId.get(workspace.id) ?? []));
+    }
+    candidateAgents.sort(
+      (left, right) =>
+        (agentDirectoryOrder.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
+        (agentDirectoryOrder.get(right.id) ?? Number.MAX_SAFE_INTEGER),
+    );
+    for (const agent of candidateAgents) {
+      appendAgent(agent);
     }
 
     return {
