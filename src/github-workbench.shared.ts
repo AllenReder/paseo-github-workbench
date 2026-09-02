@@ -30,6 +30,7 @@ const ResourceBaseSchema = z.object({
   repository: z.string().regex(/^[^/\s]+\/[^/\s]+$/),
   number: z.number().int().positive(),
   title: z.string(),
+  body: z.string().default(""),
   url: z.string().url(),
   authorLogin: z.string().nullable(),
   assigneeLogins: z.array(z.string()),
@@ -126,19 +127,6 @@ export const refreshResourceRpc = defineRpc({
     number: z.number().int().positive(),
   }),
   output: z.object({ resource: GitHubResourceSchema }),
-});
-
-export const diagnosticsRpc = defineRpc({
-  name: "github-workbench.diagnostics",
-  input: z.object({ forceRefresh: z.boolean().optional() }),
-  output: z.object({
-    viewerLogin: z.string().nullable(),
-    remaining: z.number().int().nonnegative().nullable(),
-    limit: z.number().int().nonnegative().nullable(),
-    resetAt: z.string().nullable(),
-    status: z.enum(["ok", "auth-required", "rate-limited", "unavailable"]),
-    message: z.string().nullable(),
-  }),
 });
 
 export const ProjectCatalogItemSchema = z.object({

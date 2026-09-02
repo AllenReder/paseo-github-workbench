@@ -7,15 +7,22 @@ It gathers resources from your account or a selected repository, shows their
 GitHub state in a compact workbench, and can create or reopen a corresponding
 Paseo workspace for an issue or pull request.
 
-## Screenshots
+## Interface
 
-### Account workbench
+The responsive dark workbench uses a Codex-style two-pane layout: a left pane
+lists GitHub issues and pull requests, while the right pane shows the selected
+resource's metadata, description, and supported pull-request or issue details.
+On wide layouts, an equal initial split is used, and you can drag the visible
+divider to size the list between 30% and 70% of the available width. On compact
+layouts, selecting a resource opens its detail view with a back control to
+return to the list.
 
-![Account workbench showing GitHub pull requests and issues](1.png)
-
-### Project workbench
-
-![Project workbench filtered to a selected repository](2.png)
+Use the All, Issues, PRs, Mine, and Review tabs to change the list context.
+The filter menu includes a project section: All account work is the default,
+and choosing a local Paseo project with a GitHub repository changes the
+workbench to that repository's scope. Account scope retains its repository
+filter; project scope does not duplicate it. The detail action opens an
+existing Paseo workspace or creates one when needed.
 
 ## What it does
 

@@ -2,7 +2,6 @@ import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { z } from "zod";
 import { createGitHubResourceIntake } from "./github-resource-intake.server";
 import type {
-  diagnosticsRpc,
   ensureResourceWorkspaceRpc,
   listProjectCatalogRpc,
   listResourcesRpc,
@@ -25,12 +24,6 @@ export async function listProjectCatalog(
   { paseo }: PluginHandlerContext,
 ): Promise<z.infer<typeof listProjectCatalogRpc.output>> {
   return { projects: await provisioner.listProjects(paseo) };
-}
-
-export async function diagnosticsRpcHandler(
-  input: z.infer<typeof diagnosticsRpc.input>,
-): Promise<z.infer<typeof diagnosticsRpc.output>> {
-  return intake.diagnostics(input);
 }
 
 export async function refreshResourceRpcHandler(

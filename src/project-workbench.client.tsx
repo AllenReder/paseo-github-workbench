@@ -2,11 +2,7 @@ import { type PluginWorkspacePanelProps, useWorkspace } from "@getpaseo/plugin";
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { I18nProvider, useTranslation } from "./i18n/context";
-import {
-  GitHubDiagnosticsStatus,
-  useProjectRepositories,
-  Workbench,
-} from "./workbench-ui.client";
+import { useProjectRepositories, Workbench } from "./workbench-ui.client";
 
 function ProjectGitHubWorkbenchPanelInner(props: PluginWorkspacePanelProps) {
   const { t } = useTranslation();
@@ -47,23 +43,9 @@ function ProjectGitHubWorkbenchPanelInner(props: PluginWorkspacePanelProps) {
   }
   return (
     <View style={{ backgroundColor: props.theme.colors.surface0, flex: 1 }}>
-      <View
-        style={{
-          alignItems: "flex-end",
-          paddingHorizontal: props.layout.compact ? 12 : 20,
-          paddingTop: props.layout.compact ? 8 : 12,
-        }}
-      >
-        <GitHubDiagnosticsStatus
-          compact={props.layout.compact}
-          hostId={props.host.id}
-          theme={props.theme}
-        />
-      </View>
       <Workbench
         {...props}
         scope={{ scope: "repository", repository: selectedRepository }}
-        showDiagnostics={false}
       />
     </View>
   );

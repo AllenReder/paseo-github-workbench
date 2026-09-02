@@ -2,7 +2,6 @@ import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import type { z } from "zod";
 import {
-  type diagnosticsRpc,
   type GitHubResource,
   type IssueResource,
   type listResourcesRpc,
@@ -23,14 +22,10 @@ export type GitHubResourceIntake = {
   refreshResource(
     input: z.infer<typeof refreshResourceRpc.input>,
   ): Promise<z.infer<typeof refreshResourceRpc.output>>;
-  diagnostics(
-    input: z.infer<typeof diagnosticsRpc.input>,
-  ): Promise<z.infer<typeof diagnosticsRpc.output>>;
 };
 
 type Warning = z.infer<typeof WarningSchema>;
 type CacheValue = z.infer<typeof listResourcesRpc.output>;
-type DiagnosticsValue = z.infer<typeof diagnosticsRpc.output>;
 
 const execFile = promisify(execFileCallback);
 const CACHE_TTL_MS = 30_000;
@@ -39,6 +34,7 @@ const pullRequestJsonFields = [
   "number",
   "title",
   "url",
+  "body",
   "author",
   "headRefName",
   "baseRefName",
@@ -56,6 +52,7 @@ const issueJsonFields = [
   "number",
   "title",
   "url",
+  "body",
   "author",
   "assignees",
   "labels",
@@ -68,10 +65,10 @@ const issueJsonFields = [
 
 const accountQuery = `
 query Workbench($authoredPr: String!, $reviewPr: String!, $authoredIssue: String!, $assignedIssue: String!) {
-  authoredPr: search(query: $authoredPr, type: ISSUE, first: 50) { nodes { ... on PullRequest { number title url createdAt updatedAt isDraft headRefName baseRefName mergeable reviewDecision comments { totalCount } author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
-  reviewPr: search(query: $reviewPr, type: ISSUE, first: 50) { nodes { ... on PullRequest { number title url createdAt updatedAt isDraft headRefName baseRefName mergeable reviewDecision comments { totalCount } author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
-  authoredIssue: search(query: $authoredIssue, type: ISSUE, first: 50) { nodes { ... on Issue { number title url createdAt updatedAt author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } milestone { title } comments { totalCount } } } }
-  assignedIssue: search(query: $assignedIssue, type: ISSUE, first: 50) { nodes { ... on Issue { number title url createdAt updatedAt author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } milestone { title } comments { totalCount } } } }
+  authoredPr: search(query: $authoredPr, type: ISSUE, first: 50) { nodes { ... on PullRequest { number title body url createdAt updatedAt isDraft headRefName baseRefName mergeable reviewDecision comments { totalCount } author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
+  reviewPr: search(query: $reviewPr, type: ISSUE, first: 50) { nodes { ... on PullRequest { number title body url createdAt updatedAt isDraft headRefName baseRefName mergeable reviewDecision comments { totalCount } author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
+  authoredIssue: search(query: $authoredIssue, type: ISSUE, first: 50) { nodes { ... on Issue { number title body url createdAt updatedAt author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } milestone { title } comments { totalCount } } } }
+  assignedIssue: search(query: $assignedIssue, type: ISSUE, first: 50) { nodes { ... on Issue { number title body url createdAt updatedAt author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } milestone { title } comments { totalCount } } } }
 }`;
 
 function defaultCommandRunner(
@@ -257,6 +254,7 @@ function makePullRequest(
     repository,
     number,
     title: asString(record.title) ?? `Pull request #${number}`,
+    body: asString(record.body) ?? "",
     url,
     authorLogin: loginFrom(record.author),
     assigneeLogins: stringsFromNodes(record.assignees, "login"),
@@ -304,6 +302,7 @@ function makeIssue(
     repository,
     number,
     title: asString(record.title) ?? `Issue #${number}`,
+    body: asString(record.body) ?? "",
     url,
     authorLogin: loginFrom(record.author),
     assigneeLogins: stringsFromNodes(record.assignees, "login"),
@@ -355,9 +354,6 @@ export function createGitHubResourceIntake(
   const inFlight = new Map<string, Promise<CacheValue>>();
   const viewerLogins = new Map<string, { value: string; expiresAt: number }>();
   const viewerInFlight = new Map<string, Promise<string>>();
-  let diagnosticsCache: { value: DiagnosticsValue; expiresAt: number } | null =
-    null;
-  let diagnosticsInFlight: Promise<DiagnosticsValue> | null = null;
 
   async function getViewerLogin(): Promise<string> {
     const cached = viewerLogins.get("github.com");
@@ -572,60 +568,8 @@ export function createGitHubResourceIntake(
     }
   }
 
-  async function diagnostics(
-    input: z.infer<typeof diagnosticsRpc.input>,
-  ): Promise<DiagnosticsValue> {
-    if (
-      !input.forceRefresh &&
-      diagnosticsCache &&
-      diagnosticsCache.expiresAt > Date.now()
-    )
-      return diagnosticsCache.value;
-    if (!input.forceRefresh && diagnosticsInFlight) return diagnosticsInFlight;
-    diagnosticsInFlight = (async () => {
-      try {
-        const [{ stdout: user }, { stdout: rate }] = await Promise.all([
-          run(["api", "user", "--jq", ".login"]),
-          run(["api", "rate_limit", "--jq", ".resources.core"]),
-        ]);
-        const parsed = asRecord(JSON.parse(rate));
-        const reset = asNumber(parsed?.reset);
-        const value: DiagnosticsValue = {
-          viewerLogin: user.trim() || null,
-          remaining: asNumber(parsed?.remaining),
-          limit: asNumber(parsed?.limit),
-          resetAt: reset === null ? null : new Date(reset * 1000).toISOString(),
-          status: "ok",
-          message: null,
-        };
-        diagnosticsCache = { value, expiresAt: Date.now() + CACHE_TTL_MS };
-        return value;
-      } catch (error) {
-        const warning = errorWarning(error);
-        const status =
-          warning.code === "gh-not-authenticated"
-            ? "auth-required"
-            : warning.code === "github-rate-limited"
-              ? "rate-limited"
-              : "unavailable";
-        return {
-          viewerLogin: null,
-          remaining: null,
-          limit: null,
-          resetAt: null,
-          status,
-          message: warning.message,
-        };
-      } finally {
-        diagnosticsInFlight = null;
-      }
-    })();
-    return diagnosticsInFlight;
-  }
-
   return {
     listResources,
     refreshResource,
-    diagnostics,
   };
 }

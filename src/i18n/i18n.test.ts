@@ -59,27 +59,18 @@ describe("i18n translations and fallback", () => {
   const tZh = createTranslator("zh-CN");
 
   test("provides English translation for known keys", () => {
-    expect(tEn("diagnostics.statusHealthy")).toBe("Connected and ready");
-    expect(tEn("navigation.tabs.account")).toBe("Account");
+    expect(tEn("workbench.filterProject")).toBe("Project");
     expect(tEn("filters.kinds.pullRequest")).toBe("PRs");
     expect(tEn("resource.actions.createWorkspace")).toBe("Create workspace");
   });
 
   test("provides Chinese translation for known keys", () => {
-    expect(tZh("diagnostics.statusHealthy")).toBe("连接正常，准备就绪");
-    expect(tZh("navigation.tabs.account")).toBe("账户");
+    expect(tZh("workbench.filterProject")).toBe("项目");
     expect(tZh("filters.kinds.pullRequest")).toBe("PR");
     expect(tZh("resource.actions.createWorkspace")).toBe("创建工作区");
   });
 
   test("supports interpolation in both languages", () => {
-    expect(tEn("navigation.projectsBanner", { host: "Localhost" })).toBe(
-      "Paseo projects on Localhost",
-    );
-    expect(tZh("navigation.projectsBanner", { host: "Localhost" })).toBe(
-      "位于 Localhost 上的 Paseo 项目",
-    );
-
     expect(
       tEn("resource.errors.unableToOpenExternal", {
         repository: "repo",
@@ -112,10 +103,6 @@ describe("i18n translations and fallback", () => {
       "2 need attention",
     );
     expect(tZh("summary.needsAttention", { count: 2 })).toBe("2 项待处理");
-  });
-  test("localizes compact diagnostics recheck action", () => {
-    expect(tEn("diagnostics.recheck")).toBe("Re-check");
-    expect(tZh("diagnostics.recheck")).toBe("重新检测");
   });
   test("localizes direct workspace actions and outcomes", () => {
     expect(tEn("resource.actions.creatingWorkspace")).toBe(
@@ -154,16 +141,6 @@ describe("i18n translations and fallback", () => {
     expect(tZh("filters.clearMilestone")).toBe("清除里程碑");
     expect(tEn("resource.badges.draft")).toBe("Draft");
     expect(tZh("resource.badges.draft")).toBe("草稿");
-  });
-  test("localizes compact diagnostics status", () => {
-    expect(tEn("diagnostics.statusHealthy")).toBe("Connected and ready");
-    expect(tZh("diagnostics.statusHealthy")).toBe("连接正常，准备就绪");
-    expect(tEn("diagnostics.statusNotAuthenticated")).toBe(
-      "GitHub CLI is not authenticated",
-    );
-    expect(tZh("diagnostics.statusNotAuthenticated")).toBe(
-      "GitHub CLI 未认证登录",
-    );
   });
   test("localizes PR checks breakdown details and conclusions", () => {
     expect(tEn("checksDetails.title")).toBe("Checks breakdown");
@@ -299,11 +276,6 @@ describe("i18n translations and fallback", () => {
     expect(tZh("resource.actions.selectMilestone", { milestone: "v1.0" })).toBe(
       "按里程碑 v1.0 筛选",
     );
-  });
-
-  test("provides compact status translations in Chinese", () => {
-    const translator = createTranslator("zh-CN");
-    expect(translator("diagnostics.statusHealthy")).toBe("连接正常，准备就绪");
   });
 
   test("falls back to fallback text or key itself for unknown key", () => {
