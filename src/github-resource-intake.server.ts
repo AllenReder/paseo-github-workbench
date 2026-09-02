@@ -61,12 +61,20 @@ const issueSelection = `
 number title body url state closedAt createdAt updatedAt author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } milestone { title } comments { totalCount }
 `;
 
+const pullRequestSummarySelection = `
+number title url state mergedAt closedAt createdAt updatedAt isDraft headRefName baseRefName mergeable reviewDecision comments { totalCount } author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } statusCheckRollup { state }
+`;
+
+const issueSummarySelection = `
+number title url state closedAt createdAt updatedAt author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } milestone { title } comments { totalCount }
+`;
+
 const accountQuery = `
 query Workbench($authoredPr: String!, $reviewPr: String!, $authoredIssue: String!, $assignedIssue: String!) {
-  authoredPr: search(query: $authoredPr, type: ISSUE, first: 100) { nodes { ... on PullRequest { ${pullRequestSelection} } } }
-  reviewPr: search(query: $reviewPr, type: ISSUE, first: 100) { nodes { ... on PullRequest { ${pullRequestSelection} } } }
-  authoredIssue: search(query: $authoredIssue, type: ISSUE, first: 100) { nodes { ... on Issue { ${issueSelection} } } }
-  assignedIssue: search(query: $assignedIssue, type: ISSUE, first: 100) { nodes { ... on Issue { ${issueSelection} } } }
+  authoredPr: search(query: $authoredPr, type: ISSUE, first: 100) { nodes { ... on PullRequest { ${pullRequestSummarySelection} } } }
+  reviewPr: search(query: $reviewPr, type: ISSUE, first: 100) { nodes { ... on PullRequest { ${pullRequestSummarySelection} } } }
+  authoredIssue: search(query: $authoredIssue, type: ISSUE, first: 100) { nodes { ... on Issue { ${issueSummarySelection} } } }
+  assignedIssue: search(query: $assignedIssue, type: ISSUE, first: 100) { nodes { ... on Issue { ${issueSummarySelection} } } }
 }`;
 
 const viewerQuery = `query WorkbenchViewer { viewer { login } }`;
@@ -74,8 +82,8 @@ const viewerQuery = `query WorkbenchViewer { viewer { login } }`;
 const repositoryQuery = `
 query WorkbenchRepository($owner: String!, $name: String!, $pullRequestState: PullRequestState!, $issueState: IssueState!, $includeIssues: Boolean!) {
   repository(owner: $owner, name: $name) {
-    pullRequests(states: [$pullRequestState], first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) { nodes { ${pullRequestSelection} } }
-    issues(states: [$issueState], first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) @include(if: $includeIssues) { nodes { ${issueSelection} } }
+    pullRequests(states: [$pullRequestState], first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) { nodes { ${pullRequestSummarySelection} } }
+    issues(states: [$issueState], first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) @include(if: $includeIssues) { nodes { ${issueSummarySelection} } }
   }
 }`;
 

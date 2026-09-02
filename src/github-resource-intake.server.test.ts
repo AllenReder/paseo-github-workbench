@@ -6,7 +6,9 @@ describe("GitHubResourceIntake", () => {
     let calls = 0;
     const intake = createGitHubResourceIntake(async (args) => {
       expect(args.slice(0, 2)).toEqual(["api", "graphql"]);
-      expect(args.join(" ")).toContain("contexts(first: 20)");
+      expect(args.join(" ")).not.toContain("body");
+      expect(args.join(" ")).not.toContain("contexts(first: 20)");
+      expect(args.join(" ")).toContain("statusCheckRollup { state }");
       calls += 1;
       return {
         stdout: JSON.stringify({

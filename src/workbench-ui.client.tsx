@@ -41,6 +41,7 @@ type ContentTab = "all" | "issue" | "pull-request" | "mine" | "review";
 type OwnershipFilter = "all" | "mine" | "assigned" | "review";
 type StatusFilter = LifecycleState;
 const WORKBENCH_STALE_TIME_MS = 5 * 60_000;
+const RESOURCE_DETAIL_STALE_TIME_MS = 10 * 60_000;
 export function clampWorkbenchListWidth(
   availableWidth: number,
   requestedWidth: number,
@@ -1130,6 +1131,28 @@ export function Workbench({
   );
   const selected =
     rows.find((item) => item.resource.key === selectedKey)?.resource ?? null;
+  const selectedDetailQuery = useQuery({
+    queryKey: [
+      "github-workbench",
+      host.id,
+      "resource-detail",
+      selected?.key ?? null,
+    ],
+    enabled: selected !== null,
+    staleTime: RESOURCE_DETAIL_STALE_TIME_MS,
+    queryFn: async () => {
+      if (!selected) throw new Error("No GitHub resource is selected.");
+      return refreshResource({
+        kind: selected.kind,
+        repository: selected.repository,
+        number: selected.number,
+      });
+    },
+  });
+  const selectedForDetail =
+    selected && selectedDetailQuery.data?.resource
+      ? mergeRefreshedResource(selected, selectedDetailQuery.data.resource)
+      : selected;
   useEffect(() => {
     if (
       selectedKey &&
@@ -1187,6 +1210,10 @@ export function Workbench({
                   }
                 : current,
           );
+          queryClient.setQueryData(
+            ["github-workbench", host.id, "resource-detail", resource.key],
+            { resource: refreshed },
+          );
           setRefreshingKey(null);
         })
         .catch(() => {
@@ -1194,7 +1221,7 @@ export function Workbench({
           toast.error(t("resource.toasts.refreshFailed"));
         });
     },
-    [queryClient, queryKey, refreshResource, t, toast],
+    [host.id, queryClient, queryKey, refreshResource, t, toast],
   );
   const ensure = useCallback(
     (resource: GitHubResource) => {
@@ -1473,7 +1500,7 @@ export function Workbench({
     <View style={{ backgroundColor: theme.colors.surface0, flex: 1 }}>
       {showingDetail ? (
         <DetailPane
-          resource={selected}
+          resource={selectedForDetail}
           theme={theme}
           navigation={navigation}
           refreshing={refreshingKey === selected?.key}
@@ -1495,7 +1522,7 @@ export function Workbench({
             }}
           >
             <DetailPane
-              resource={selected}
+              resource={selectedForDetail}
               theme={theme}
               navigation={navigation}
               refreshing={refreshingKey === selected?.key}
@@ -1579,7 +1606,7 @@ export function Workbench({
           </View>
           <View style={{ backgroundColor: theme.colors.surface0, flex: 1 }}>
             <DetailPane
-              resource={selected}
+              resource={selectedForDetail}
               theme={theme}
               navigation={navigation}
               refreshing={refreshingKey === selected?.key}
