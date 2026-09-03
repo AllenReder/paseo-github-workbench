@@ -15,6 +15,21 @@ export type GitHubCommandRunner = (
   args: readonly string[],
 ) => Promise<{ stdout: string; stderr: string }>;
 
+export type GitHubFetch = (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+) => Promise<Response>;
+
+export type GitHubResourceIntakeOptions = {
+  /**
+   * Uses GitHub's HTTP API directly when set. `undefined` reads GH_TOKEN or
+   * GITHUB_TOKEN from the daemon environment; `null` explicitly uses gh.
+   */
+  token?: string | null;
+  fetch?: GitHubFetch;
+  apiUrl?: string;
+};
+
 export type GitHubResourceIntake = {
   listResources(
     input: z.infer<typeof listResourcesRpc.input>,
@@ -26,63 +41,101 @@ export type GitHubResourceIntake = {
 
 type Warning = z.infer<typeof WarningSchema>;
 type CacheValue = z.infer<typeof listResourcesRpc.output>;
+type GraphqlResult = { data: Record<string, unknown>; error: string | null };
+type ResourceLoad = { resources: GitHubResource[]; warnings: Warning[] };
 
 const execFile = promisify(execFileCallback);
-const CACHE_TTL_MS = 30_000;
+// Keep this slightly shorter than the five-minute client poll interval so a
+// scheduled refetch always reaches GitHub rather than extending stale data.
+const CACHE_TTL_MS = 4 * 60_000;
+const STALE_CACHE_GRACE_MS = 60 * 60_000;
+const GH_COMMAND_TIMEOUT_MS = 60_000;
+const GH_COMMAND_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
+const MAX_CHECK_DETAILS_PER_PULL_REQUEST = 20;
+const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
 
-const pullRequestJsonFields = [
-  "number",
-  "title",
-  "url",
-  "body",
-  "author",
-  "headRefName",
-  "baseRefName",
-  "isDraft",
-  "state",
-  "mergedAt",
-  "closedAt",
-  "labels",
-  "updatedAt",
-  "createdAt",
-  "reviewDecision",
-  "statusCheckRollup",
-  "mergeable",
-  "comments",
-].join(",");
+const pullRequestSelection = `
+number title body url state mergedAt closedAt createdAt updatedAt isDraft headRefName baseRefName mergeable reviewDecision comments { totalCount } author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } statusCheckRollup { state contexts(first: ${MAX_CHECK_DETAILS_PER_PULL_REQUEST}) { nodes { ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } }
+`;
 
-const issueJsonFields = [
-  "number",
-  "title",
-  "url",
-  "body",
-  "author",
-  "assignees",
-  "labels",
-  "milestone",
-  "comments",
-  "createdAt",
-  "updatedAt",
-  "closedAt",
-  "state",
-].join(",");
+const issueSelection = `
+number title body url state closedAt createdAt updatedAt author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } milestone { title } comments { totalCount }
+`;
+
+const pullRequestSummarySelection = `
+number title url state mergedAt closedAt createdAt updatedAt isDraft headRefName baseRefName mergeable reviewDecision comments { totalCount } author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } statusCheckRollup { state }
+`;
+
+const issueSummarySelection = `
+number title url state closedAt createdAt updatedAt author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } milestone { title } comments { totalCount }
+`;
 
 const accountQuery = `
 query Workbench($authoredPr: String!, $reviewPr: String!, $authoredIssue: String!, $assignedIssue: String!) {
-  authoredPr: search(query: $authoredPr, type: ISSUE, first: 100) { nodes { ... on PullRequest { number title body url state mergedAt closedAt createdAt updatedAt isDraft headRefName baseRefName mergeable reviewDecision comments { totalCount } author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
-  reviewPr: search(query: $reviewPr, type: ISSUE, first: 100) { nodes { ... on PullRequest { number title body url state mergedAt closedAt createdAt updatedAt isDraft headRefName baseRefName mergeable reviewDecision comments { totalCount } author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } statusCheckRollup { state contexts(first: 100) { nodes { ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
-  authoredIssue: search(query: $authoredIssue, type: ISSUE, first: 100) { nodes { ... on Issue { number title body url state closedAt createdAt updatedAt author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } milestone { title } comments { totalCount } } } }
-  assignedIssue: search(query: $assignedIssue, type: ISSUE, first: 100) { nodes { ... on Issue { number title body url state closedAt createdAt updatedAt author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } assignees(first: 20) { nodes { login } } milestone { title } comments { totalCount } } } }
+  authoredPr: search(query: $authoredPr, type: ISSUE, first: 100) { nodes { ... on PullRequest { ${pullRequestSummarySelection} } } }
+  reviewPr: search(query: $reviewPr, type: ISSUE, first: 100) { nodes { ... on PullRequest { ${pullRequestSummarySelection} } } }
+  authoredIssue: search(query: $authoredIssue, type: ISSUE, first: 100) { nodes { ... on Issue { ${issueSummarySelection} } } }
+  assignedIssue: search(query: $assignedIssue, type: ISSUE, first: 100) { nodes { ... on Issue { ${issueSummarySelection} } } }
 }`;
+
+const repositoryQuery = `
+query WorkbenchRepository($owner: String!, $name: String!, $pullRequestState: PullRequestState!, $issueState: IssueState!, $includeIssues: Boolean!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: [$pullRequestState], first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) { nodes { ${pullRequestSummarySelection} } }
+    issues(states: [$issueState], first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) @include(if: $includeIssues) { nodes { ${issueSummarySelection} } }
+  }
+}`;
+
+function resourceQuery(kind: "pull-request" | "issue"): string {
+  const field = kind === "pull-request" ? "pullRequest" : "issue";
+  const selection =
+    kind === "pull-request" ? pullRequestSelection : issueSelection;
+  return `
+query WorkbenchResource($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    ${field}(number: $number) { ${selection} }
+  }
+}`;
+}
 
 function defaultCommandRunner(
   args: readonly string[],
 ): Promise<{ stdout: string; stderr: string }> {
   return execFile("gh", args, {
-    timeout: 30_000,
-    maxBuffer: 4 * 1024 * 1024,
+    // GraphQL can return hundreds of resources. Bound it, but do not discard a
+    // valid large response while gh is still parsing its output.
+    timeout: GH_COMMAND_TIMEOUT_MS,
+    maxBuffer: GH_COMMAND_MAX_BUFFER_BYTES,
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
   });
+}
+
+function environmentToken(): string | null {
+  const token = process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN;
+  return token?.trim() || null;
+}
+
+function graphqlErrorMessage(value: unknown): string | null {
+  const root = asRecord(value);
+  const errors = Array.isArray(root?.errors) ? root.errors : [];
+  const messages = errors.flatMap((error) => {
+    const message = asString(asRecord(error)?.message);
+    return message ? [message] : [];
+  });
+  return messages.length > 0 ? messages.join("\n") : null;
+}
+
+function partialDataWarning(error: string): Warning {
+  return {
+    code: "github-query-failed",
+    message: `Some GitHub fields could not be loaded: ${error}`,
+  };
+}
+
+function splitRepository(repository: string): [string, string] {
+  const [owner, name] = repository.split("/", 2);
+  if (!owner || !name) throw new Error("GitHub repository must be owner/name.");
+  return [owner, name];
 }
 
 function errorWarning(error: unknown): Warning {
@@ -96,11 +149,15 @@ function errorWarning(error: unknown): Warning {
       code: "gh-cli-not-found",
       message: "GitHub CLI (gh) is not installed on the Paseo daemon host.",
     };
-  if (/authentication|not logged in|auth login/i.test(text))
+  if (
+    /authentication|not logged in|auth login|bad credentials|HTTP 401/i.test(
+      text,
+    )
+  )
     return {
       code: "gh-not-authenticated",
       message:
-        "Authenticate gh on the Paseo daemon host before using GitHub Workbench.",
+        "Authenticate gh or configure GH_TOKEN on the Paseo daemon host before using GitHub Workbench.",
     };
   if (/rate limit|api rate limit|HTTP 403/i.test(text))
     return {
@@ -115,7 +172,7 @@ function errorWarning(error: unknown): Warning {
     };
   return {
     code: "github-query-failed",
-    message: text || "GitHub CLI query failed.",
+    message: text || "GitHub query failed.",
   };
 }
 
@@ -158,27 +215,70 @@ function labelsFrom(value: unknown): string[] {
 
 function summarizeChecks(checks: unknown): PullRequestResource["checksStatus"] {
   if (!Array.isArray(checks) || checks.length === 0) return "none";
-  let sawKnown = false;
+  let sawFailure = false;
+  let sawPending = false;
+  let sawUnknown = false;
+  let sawSuccess = false;
   for (const check of checks) {
     if (!check || typeof check !== "object") continue;
     const record = check as Record<string, unknown>;
     const status =
-      typeof record.status === "string" ? record.status.toUpperCase() : "";
-    if (status && status !== "COMPLETED") return "pending";
+      typeof record.status === "string"
+        ? record.status.toUpperCase()
+        : typeof record.state === "string"
+          ? record.state.toUpperCase()
+          : "";
     const conclusion =
       typeof record.conclusion === "string"
         ? record.conclusion.toUpperCase()
         : "";
     if (
-      ["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"].includes(
-        conclusion,
-      )
-    )
-      return "failure";
-    if (["SUCCESS", "NEUTRAL", "SKIPPED", "STALE"].includes(conclusion))
-      sawKnown = true;
+      [
+        "FAILURE",
+        "ERROR",
+        "TIMED_OUT",
+        "CANCELLED",
+        "ACTION_REQUIRED",
+        "STARTUP_FAILURE",
+      ].includes(conclusion) ||
+      [
+        "FAILURE",
+        "ERROR",
+        "TIMED_OUT",
+        "CANCELLED",
+        "ACTION_REQUIRED",
+        "STARTUP_FAILURE",
+      ].includes(status)
+    ) {
+      sawFailure = true;
+      continue;
+    }
+    if (
+      [
+        "IN_PROGRESS",
+        "PENDING",
+        "QUEUED",
+        "EXPECTED",
+        "REQUESTED",
+        "WAITING",
+      ].includes(status)
+    ) {
+      sawPending = true;
+      continue;
+    }
+    if (
+      ["SUCCESS", "NEUTRAL", "SKIPPED", "STALE"].includes(conclusion) ||
+      ["SUCCESS", "NEUTRAL", "SKIPPED", "STALE"].includes(status)
+    ) {
+      sawSuccess = true;
+    } else {
+      sawUnknown = true;
+    }
   }
-  return sawKnown ? "success" : "unknown";
+  if (sawFailure) return "failure";
+  if (sawPending) return "pending";
+  if (sawUnknown) return "unknown";
+  return sawSuccess ? "success" : "unknown";
 }
 
 function checkStatusFromGraphql(
@@ -197,11 +297,17 @@ function checkStatusFromGraphql(
     return "failure";
   if (state === "SUCCESS") return "success";
   const contexts = asRecord(rollup.contexts);
-  return summarizeChecks(contexts?.nodes);
+  return summarizeChecks(contexts?.nodes ?? rollup.nodes);
 }
 
 function checkDetailsFrom(value: unknown): PullRequestResource["checkDetails"] {
-  const records = Array.isArray(value) ? value : asRecord(value)?.nodes;
+  const record = asRecord(value);
+  const contexts = asRecord(record?.contexts);
+  const records = Array.isArray(value)
+    ? value
+    : Array.isArray(record?.nodes)
+      ? record.nodes
+      : contexts?.nodes;
   if (!Array.isArray(records)) return [];
   return records
     .flatMap((item) => {
@@ -209,7 +315,9 @@ function checkDetailsFrom(value: unknown): PullRequestResource["checkDetails"] {
       if (!record) return [];
       const name =
         asString(record.name) ?? asString(record.context) ?? "Unnamed check";
-      const status = asString(record.status)?.toUpperCase();
+      const status =
+        asString(record.status)?.toUpperCase() ??
+        asString(record.state)?.toUpperCase();
       const conclusion = asString(record.conclusion)?.toUpperCase();
       const normalized: PullRequestResource["checkDetails"][number]["status"] =
         conclusion === "FAILURE" ||
@@ -217,19 +325,31 @@ function checkDetailsFrom(value: unknown): PullRequestResource["checkDetails"] {
         conclusion === "CANCELLED" ||
         conclusion === "TIMED_OUT" ||
         conclusion === "ACTION_REQUIRED" ||
+        conclusion === "STARTUP_FAILURE" ||
         [
           "FAILURE",
           "ERROR",
           "CANCELLED",
           "TIMED_OUT",
           "ACTION_REQUIRED",
+          "STARTUP_FAILURE",
         ].includes(status ?? "")
           ? "failure"
-          : ["IN_PROGRESS", "PENDING", "QUEUED", "EXPECTED"].includes(
-                status ?? "",
-              )
+          : [
+                "IN_PROGRESS",
+                "PENDING",
+                "QUEUED",
+                "EXPECTED",
+                "REQUESTED",
+                "WAITING",
+              ].includes(status ?? "")
             ? "pending"
-            : conclusion === "SUCCESS" || status === "SUCCESS"
+            : ["SUCCESS", "NEUTRAL", "SKIPPED", "STALE"].includes(
+                  conclusion ?? "",
+                ) ||
+                ["SUCCESS", "NEUTRAL", "SKIPPED", "STALE"].includes(
+                  status ?? "",
+                )
               ? "success"
               : "unknown";
       return [{ name, status: normalized }];
@@ -377,110 +497,126 @@ function mergeResources(resources: GitHubResource[]): GitHubResource[] {
 
 export function createGitHubResourceIntake(
   run: GitHubCommandRunner = defaultCommandRunner,
+  options: GitHubResourceIntakeOptions = {},
 ): GitHubResourceIntake {
-  const cache = new Map<string, { value: CacheValue; expiresAt: number }>();
+  const cache = new Map<
+    string,
+    { value: CacheValue; expiresAt: number; staleUntil: number }
+  >();
   const inFlight = new Map<string, Promise<CacheValue>>();
-  const viewerLogins = new Map<string, { value: string; expiresAt: number }>();
-  const viewerInFlight = new Map<string, Promise<string>>();
+  const token =
+    options.token === undefined
+      ? environmentToken()
+      : options.token?.trim() || null;
+  const fetcher = options.fetch ?? globalThis.fetch;
+  const apiUrl = options.apiUrl ?? GITHUB_GRAPHQL_URL;
 
-  async function getViewerLogin(): Promise<string> {
-    const cached = viewerLogins.get("github.com");
-    if (cached && cached.expiresAt > Date.now()) return cached.value;
-    const running = viewerInFlight.get("github.com");
-    if (running) return running;
-    const request = (async () => {
-      try {
-        const { stdout } = await run(["api", "user", "--jq", ".login"]);
-        const login = stdout.trim();
-        if (!login)
-          throw new Error("GitHub CLI returned no authenticated login.");
-        viewerLogins.set("github.com", {
-          value: login,
-          expiresAt: Date.now() + CACHE_TTL_MS,
-        });
-        return login;
-      } finally {
-        viewerInFlight.delete("github.com");
+  async function graphql(
+    query: string,
+    variables: Record<string, string | number | boolean>,
+  ): Promise<GraphqlResult> {
+    if (!token) {
+      const args = ["api", "graphql", "-f", `query=${query}`];
+      for (const [key, value] of Object.entries(variables)) {
+        args.push(typeof value === "string" ? "-f" : "-F", `${key}=${value}`);
       }
-    })();
-    viewerInFlight.set("github.com", request);
-    return request;
+      const { stdout } = await run(args);
+      const parsed: unknown = JSON.parse(stdout);
+      const error = graphqlErrorMessage(parsed);
+      const data = asRecord(asRecord(parsed)?.data);
+      // GitHub can return usable partial data when a fine-grained token lacks
+      // access to an optional field such as statusCheckRollup. Keep the list
+      // available in that case instead of turning the entire workbench blank.
+      if (error && !data) throw new Error(error);
+      return { data: data ?? {}, error };
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const response = await fetcher(apiUrl, {
+        method: "POST",
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+        body: JSON.stringify({ query, variables }),
+        signal: controller.signal,
+      });
+      const body = await response.text();
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        throw new Error(
+          `GitHub API returned invalid JSON (HTTP ${response.status}).`,
+        );
+      }
+      const error = graphqlErrorMessage(parsed);
+      const data = asRecord(asRecord(parsed)?.data);
+      if (!response.ok || (error && !data)) {
+        throw new Error(
+          error ?? `GitHub API request failed with HTTP ${response.status}.`,
+        );
+      }
+      return { data: data ?? {}, error };
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   async function repositoryResources(
     repository: string,
     state: "open" | "merged" | "closed" = "open",
-  ): Promise<GitHubResource[]> {
-    const prState =
-      state === "merged" ? "merged" : state === "closed" ? "closed" : "open";
-    const issueState = state === "closed" ? "closed" : "open";
-    const queries: Array<Promise<{ stdout: string; stderr: string }>> = [
-      run([
-        "pr",
-        "list",
-        "--repo",
-        repository,
-        "--state",
-        prState,
-        "--limit",
-        "100",
-        "--json",
-        pullRequestJsonFields,
-      ]),
-    ];
-    if (state !== "merged") {
-      queries.push(
-        run([
-          "issue",
-          "list",
-          "--repo",
-          repository,
-          "--state",
-          issueState,
-          "--limit",
-          "100",
-          "--json",
-          issueJsonFields,
-        ]),
+  ): Promise<ResourceLoad> {
+    const [owner, name] = splitRepository(repository);
+    const result = await graphql(repositoryQuery, {
+      owner,
+      name,
+      pullRequestState:
+        state === "merged" ? "MERGED" : state === "closed" ? "CLOSED" : "OPEN",
+      issueState: state === "closed" ? "CLOSED" : "OPEN",
+      includeIssues: state !== "merged",
+    });
+    const record = asRecord(result.data.repository);
+    if (!record)
+      throw new Error(
+        result.error ?? "GitHub returned no data for this repository.",
       );
-    }
-    const [pullRequests, issues] = await Promise.all(queries);
-    const parse = (text: string) => {
-      const value: unknown = JSON.parse(text);
-      return Array.isArray(value)
-        ? value.flatMap((item) => {
-            const itemRecord = asRecord(item);
-            return itemRecord ? [itemRecord] : [];
+    const nodes = (field: "pullRequests" | "issues") => {
+      const connection = asRecord(record?.[field]);
+      return Array.isArray(connection?.nodes)
+        ? connection.nodes.flatMap((item) => {
+            const resource = asRecord(item);
+            return resource ? [resource] : [];
           })
         : [];
     };
-    const decorateRepository = (record: Record<string, unknown>) => ({
-      ...record,
-      repository: { nameWithOwner: repository },
-    });
-    const prItems = parse(pullRequests.stdout).flatMap((record) => {
-      const item = makePullRequest(decorateRepository(record), {
+    const prItems = nodes("pullRequests").flatMap((item) => {
+      const resource = makePullRequest(item, {
         isMine: false,
         reviewRequestedFromMe: false,
       });
-      return item ? [item] : [];
+      return resource ? [resource] : [];
     });
-    const issueItems = issues
-      ? parse(issues.stdout).flatMap((record) => {
-          const item = makeIssue(decorateRepository(record), {
-            isMine: false,
-            isAssignedToMe: false,
-          });
-          return item ? [item] : [];
-        })
-      : [];
-    return mergeResources([...prItems, ...issueItems]);
+    const issueItems = nodes("issues").flatMap((item) => {
+      const resource = makeIssue(item, {
+        isMine: false,
+        isAssignedToMe: false,
+      });
+      return resource ? [resource] : [];
+    });
+    return {
+      resources: mergeResources([...prItems, ...issueItems]),
+      warnings: result.error ? [partialDataWarning(result.error)] : [],
+    };
   }
 
   async function accountResources(
     state: "open" | "merged" | "closed" = "open",
-  ): Promise<GitHubResource[]> {
-    const viewer = await getViewerLogin();
+  ): Promise<ResourceLoad> {
     const prQualifier =
       state === "open"
         ? "is:open"
@@ -488,25 +624,27 @@ export function createGitHubResourceIntake(
           ? "is:merged"
           : "is:closed -is:merged";
     const issueQualifier = state === "closed" ? "is:closed" : "is:open";
-    const { stdout } = await run([
-      "api",
-      "graphql",
-      "-f",
-      `query=${accountQuery}`,
-      "-f",
-      `authoredPr=is:pr ${prQualifier} author:${viewer}`,
-      "-f",
-      `reviewPr=is:pr ${prQualifier} review-requested:${viewer}`,
-      "-f",
-      state === "merged"
-        ? `authoredIssue=is:issue is:closed author:__none__`
-        : `authoredIssue=is:issue ${issueQualifier} author:${viewer}`,
-      "-f",
-      state === "merged"
-        ? `assignedIssue=is:issue is:closed assignee:__none__`
-        : `assignedIssue=is:issue ${issueQualifier} assignee:${viewer}`,
-    ]);
-    const root = asRecord(asRecord(JSON.parse(stdout))?.data);
+    const result = await graphql(accountQuery, {
+      authoredPr: `is:pr ${prQualifier} author:@me`,
+      reviewPr: `is:pr ${prQualifier} review-requested:@me`,
+      authoredIssue:
+        state === "merged"
+          ? "is:issue is:closed author:__none__"
+          : `is:issue ${issueQualifier} author:@me`,
+      assignedIssue:
+        state === "merged"
+          ? "is:issue is:closed assignee:__none__"
+          : `is:issue ${issueQualifier} assignee:@me`,
+    });
+    const root = result.data;
+    const connectionNames = [
+      "authoredPr",
+      "reviewPr",
+      "authoredIssue",
+      "assignedIssue",
+    ];
+    if (!connectionNames.some((name) => asRecord(root[name])))
+      throw new Error(result.error ?? "GitHub returned no account resources.");
     const nodes = (name: string) => {
       const connection = asRecord(root?.[name]);
       return Array.isArray(connection?.nodes)
@@ -551,7 +689,10 @@ export function createGitHubResourceIntake(
               return item ? [item] : [];
             }),
           ];
-    return mergeResources([...prItems, ...issueItems]);
+    return {
+      resources: mergeResources([...prItems, ...issueItems]),
+      warnings: result.error ? [partialDataWarning(result.error)] : [],
+    };
   }
 
   async function listResources(
@@ -567,20 +708,32 @@ export function createGitHubResourceIntake(
     if (running) return running;
     const request = (async () => {
       try {
-        const resources =
+        const loaded =
           input.scope === "account"
             ? await accountResources(state)
             : repository
               ? await repositoryResources(repository, state)
-              : [];
+              : { resources: [], warnings: [] };
         const value = {
-          resources,
+          resources: loaded.resources,
           refreshedAt: new Date().toISOString(),
-          warnings: [],
+          warnings: loaded.warnings,
         };
-        cache.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
+        const now = Date.now();
+        cache.set(key, {
+          value,
+          expiresAt: now + CACHE_TTL_MS,
+          staleUntil: now + CACHE_TTL_MS + STALE_CACHE_GRACE_MS,
+        });
         return value;
       } catch (error) {
+        const stale = cache.get(key);
+        if (stale && stale.staleUntil > Date.now()) {
+          return {
+            ...stale.value,
+            warnings: [...stale.value.warnings, errorWarning(error)],
+          };
+        }
         return {
           resources: [],
           refreshedAt: new Date().toISOString(),
@@ -597,33 +750,29 @@ export function createGitHubResourceIntake(
   async function refreshResource(
     input: z.infer<typeof refreshResourceRpc.input>,
   ): Promise<z.infer<typeof refreshResourceRpc.output>> {
-    const command = input.kind === "pull-request" ? "pr" : "issue";
-    const fields =
-      input.kind === "pull-request" ? pullRequestJsonFields : issueJsonFields;
     try {
-      const { stdout } = await run([
-        command,
-        "view",
-        String(input.number),
-        "--repo",
-        input.repository,
-        "--json",
-        fields,
-      ]);
-      const record = asRecord(JSON.parse(stdout));
+      const [owner, name] = splitRepository(input.repository);
+      const result = await graphql(resourceQuery(input.kind), {
+        owner,
+        name,
+        number: input.number,
+      });
+      const record = asRecord(
+        asRecord(result.data.repository)?.[
+          input.kind === "pull-request" ? "pullRequest" : "issue"
+        ],
+      );
       if (!record)
-        throw new Error("GitHub returned an invalid resource payload.");
-      const decorated = {
-        ...record,
-        repository: { nameWithOwner: input.repository },
-      };
+        throw new Error(
+          result.error ?? "GitHub returned an invalid resource payload.",
+        );
       const resource =
         input.kind === "pull-request"
-          ? makePullRequest(decorated, {
+          ? makePullRequest(record, {
               isMine: false,
               reviewRequestedFromMe: false,
             })
-          : makeIssue(decorated, { isMine: false, isAssignedToMe: false });
+          : makeIssue(record, { isMine: false, isAssignedToMe: false });
       if (!resource)
         throw new Error("GitHub returned an incomplete resource payload.");
       return { resource };

@@ -3,7 +3,12 @@ import type {
   IssueResource,
   PullRequestResource,
 } from "./github-workbench.shared";
-import { createResourceIndex } from "./resource-index.shared";
+import {
+  applyAgentUpdate,
+  applyWorkspaceUpdate,
+  createResourceIndex,
+  type PaseoDirectorySnapshot,
+} from "./resource-index.shared";
 
 describe("ResourceIndex", () => {
   const pr1: PullRequestResource = {
@@ -210,7 +215,7 @@ describe("ResourceIndex", () => {
     });
   });
   it("enriches resources with workspaces and deduplicates directory agents", () => {
-    const directory = {
+    const directory: PaseoDirectorySnapshot = {
       workspaces: [
         {
           id: "ws-1",
@@ -226,6 +231,17 @@ describe("ResourceIndex", () => {
       ],
       agents: [
         {
+          id: "agent-0",
+          workspaceId: "ws-1",
+          title: "Workspace agent first",
+          status: "idle" as const,
+          requiresAttention: false,
+          attentionReason: null,
+          pendingPermissions: 0,
+          updatedAt: "2026-02-05T00:00:00Z",
+          labels: {},
+        },
+        {
           id: "agent-1",
           workspaceId: "ws-1",
           title: "PR Agent",
@@ -236,6 +252,16 @@ describe("ResourceIndex", () => {
           updatedAt: "2026-02-05T00:00:00Z",
           labels: { "github-workbench.resource": pr1.key }, // matched by BOTH label and workspace
         },
+        {
+          id: "agent-2",
+          title: "Direct resource agent",
+          status: "idle" as const,
+          requiresAttention: false,
+          attentionReason: null,
+          pendingPermissions: 0,
+          updatedAt: "2026-02-05T00:00:00Z",
+          labels: { "github-workbench.resource": pr1.key },
+        },
       ],
     };
 
@@ -243,8 +269,12 @@ describe("ResourceIndex", () => {
     const item = index.get(pr1.key);
     expect(item?.workspaceIds).toEqual(["ws-1"]);
     expect(item?.workspaceNames).toEqual(["pr-10"]);
-    expect(item?.agents).toHaveLength(1);
-    expect(item?.agents[0].id).toBe("agent-1");
+    expect(item?.agents).toHaveLength(3);
+    expect(item?.agents.map((agent) => agent.id)).toEqual([
+      "agent-0",
+      "agent-1",
+      "agent-2",
+    ]);
 
     const queryResult = index.query({
       focusKey: null,
@@ -360,5 +390,84 @@ describe("ResourceIndex", () => {
     });
     expect(missing.items).toHaveLength(0);
     expect(missing.summary.total).toBe(0);
+  });
+
+  it("patches directory snapshots from Paseo updates without a full refetch", () => {
+    const snapshot = {
+      workspaces: [
+        {
+          id: "ws-1",
+          projectId: "project-1",
+          projectDisplayName: "Paseo",
+          name: "Fix parser",
+          archivingAt: null,
+          remoteUrl: "git@github.com:getpaseo/paseo.git",
+          pullRequestNumber: 10,
+          worktreeSlug: "pr-10",
+          activityAt: "2026-02-03T00:00:00Z",
+        },
+      ],
+      agents: [
+        {
+          id: "agent-1",
+          workspaceId: "ws-1",
+          title: "Reviewer",
+          status: "idle" as const,
+          requiresAttention: false,
+          attentionReason: null,
+          pendingPermissions: 0,
+          updatedAt: "2026-02-03T00:00:00Z",
+          labels: {},
+        },
+      ],
+    };
+
+    const workspaceUpsert = {
+      kind: "upsert",
+      workspace: {
+        id: "ws-1",
+        projectId: "project-1",
+        projectDisplayName: "Paseo",
+        name: "Fix parser (updated)",
+        archivingAt: null,
+        gitRuntime: { remoteUrl: "https://github.com/getpaseo/paseo" },
+        githubRuntime: { pullRequest: { number: 10 } },
+        worktreeSlug: "pr-10",
+        activityAt: "2026-02-04T00:00:00Z",
+      },
+    } as unknown as Parameters<typeof applyWorkspaceUpdate>[1];
+    const agentUpsert = {
+      kind: "upsert",
+      agent: {
+        id: "agent-1",
+        workspaceId: "ws-1",
+        title: "Reviewer (updated)",
+        status: "running",
+        requiresAttention: true,
+        attentionReason: "permission",
+        pendingPermissions: [{ id: "permission-1" }],
+        updatedAt: "2026-02-04T00:00:00Z",
+        labels: { role: "reviewer" },
+      },
+    } as unknown as Parameters<typeof applyAgentUpdate>[1];
+
+    const updated = applyAgentUpdate(
+      applyWorkspaceUpdate(snapshot, workspaceUpsert),
+      agentUpsert,
+    );
+    expect(updated.workspaces).toHaveLength(1);
+    expect(updated.workspaces[0]?.name).toBe("Fix parser (updated)");
+    expect(updated.workspaces[0]?.remoteUrl).toBe(
+      "https://github.com/getpaseo/paseo",
+    );
+    expect(updated.agents[0]?.title).toBe("Reviewer (updated)");
+    expect(updated.agents[0]?.pendingPermissions).toBe(1);
+
+    const removed = applyAgentUpdate(
+      applyWorkspaceUpdate(updated, { kind: "remove", id: "ws-1" }),
+      { kind: "remove", agentId: "agent-1" },
+    );
+    expect(removed.workspaces).toHaveLength(0);
+    expect(removed.agents).toHaveLength(0);
   });
 });

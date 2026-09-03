@@ -1,4 +1,10 @@
 import type {
+  PaseoAgent,
+  PaseoAgentUpdate,
+  PaseoWorkspace,
+  PaseoWorkspaceUpdate,
+} from "@getpaseo/client";
+import type {
   AgentSummary,
   GitHubResource,
   IssueResource,
@@ -40,6 +46,82 @@ export type PaseoDirectorySnapshot = {
   workspaces: WorkspaceSnapshot[];
   agents: AgentSnapshot[];
 };
+
+export function toWorkspaceSnapshot(
+  workspace: PaseoWorkspace,
+): WorkspaceSnapshot {
+  return {
+    id: workspace.id,
+    projectId: workspace.projectId,
+    projectDisplayName: workspace.projectDisplayName,
+    name: workspace.name,
+    archivingAt: workspace.archivingAt,
+    remoteUrl: workspace.gitRuntime?.remoteUrl ?? null,
+    pullRequestNumber: workspace.githubRuntime?.pullRequest?.number,
+    worktreeSlug: workspace.worktreeSlug,
+    activityAt: workspace.activityAt,
+  };
+}
+
+export function toAgentSnapshot(agent: PaseoAgent): AgentSnapshot {
+  return {
+    id: agent.id,
+    workspaceId: agent.workspaceId,
+    title: agent.title,
+    status: agent.status,
+    requiresAttention: agent.requiresAttention ?? false,
+    attentionReason: agent.attentionReason ?? null,
+    pendingPermissions: agent.pendingPermissions.length,
+    updatedAt: agent.updatedAt,
+    labels: agent.labels,
+  };
+}
+
+export function applyWorkspaceUpdate(
+  snapshot: PaseoDirectorySnapshot,
+  update: PaseoWorkspaceUpdate,
+): PaseoDirectorySnapshot {
+  if (update.kind === "remove") {
+    return {
+      ...snapshot,
+      workspaces: snapshot.workspaces.filter(
+        (workspace) => workspace.id !== update.id,
+      ),
+    };
+  }
+  const workspace = toWorkspaceSnapshot(update.workspace);
+  const index = snapshot.workspaces.findIndex(
+    (entry) => entry.id === workspace.id,
+  );
+  if (index < 0) {
+    return { ...snapshot, workspaces: [...snapshot.workspaces, workspace] };
+  }
+  const workspaces = snapshot.workspaces.filter(
+    (entry) => entry.id !== workspace.id,
+  );
+  workspaces.splice(Math.min(index, workspaces.length), 0, workspace);
+  return { ...snapshot, workspaces };
+}
+
+export function applyAgentUpdate(
+  snapshot: PaseoDirectorySnapshot,
+  update: PaseoAgentUpdate,
+): PaseoDirectorySnapshot {
+  if (update.kind === "remove") {
+    return {
+      ...snapshot,
+      agents: snapshot.agents.filter((agent) => agent.id !== update.agentId),
+    };
+  }
+  const agent = toAgentSnapshot(update.agent);
+  const index = snapshot.agents.findIndex((entry) => entry.id === agent.id);
+  if (index < 0) {
+    return { ...snapshot, agents: [...snapshot.agents, agent] };
+  }
+  const agents = snapshot.agents.filter((entry) => entry.id !== agent.id);
+  agents.splice(Math.min(index, agents.length), 0, agent);
+  return { ...snapshot, agents };
+}
 
 export type ResourceClassification = {
   bucket:
@@ -260,6 +342,9 @@ export function createResourceIndex(
 ): ResourceIndex {
   // 1. Enrich resources with directory data if available
   const workspacesByRepo = new Map<string, WorkspaceSnapshot[]>();
+  const agentsByWorkspaceId = new Map<string, AgentSnapshot[]>();
+  const agentsByResourceId = new Map<string, AgentSnapshot[]>();
+  const agentDirectoryOrder = new Map<string, number>();
   if (directory) {
     for (const ws of directory.workspaces) {
       if (ws.archivingAt) continue;
@@ -271,6 +356,26 @@ export function createResourceIndex(
         workspacesByRepo.set(repo, list);
       }
       list.push(ws);
+    }
+    for (const [index, agent] of directory.agents.entries()) {
+      agentDirectoryOrder.set(agent.id, index);
+      if (agent.workspaceId) {
+        let agents = agentsByWorkspaceId.get(agent.workspaceId);
+        if (!agents) {
+          agents = [];
+          agentsByWorkspaceId.set(agent.workspaceId, agents);
+        }
+        agents.push(agent);
+      }
+      const resourceId = agent.labels["github-workbench.resource"];
+      if (resourceId) {
+        let agents = agentsByResourceId.get(resourceId);
+        if (!agents) {
+          agents = [];
+          agentsByResourceId.set(resourceId, agents);
+        }
+        agents.push(agent);
+      }
     }
   }
 
@@ -291,20 +396,10 @@ export function createResourceIndex(
       resource.repository,
       resource.number,
     );
-    const matchingWorkspaceIdSet = new Set(
-      matchingWorkspaces.map((ws) => ws.id),
-    );
-
-    const matchedAgents = directory.agents.filter(
-      (agent) =>
-        agent.labels["github-workbench.resource"] === resourceId ||
-        (agent.workspaceId && matchingWorkspaceIdSet.has(agent.workspaceId)),
-    );
-
     const agentSummaries: AgentSummary[] = [];
     const seenAgentIds = new Set<string>();
-    for (const agent of matchedAgents) {
-      if (seenAgentIds.has(agent.id)) continue;
+    const appendAgent = (agent: AgentSnapshot) => {
+      if (seenAgentIds.has(agent.id)) return;
       seenAgentIds.add(agent.id);
       agentSummaries.push({
         id: agent.id,
@@ -315,6 +410,18 @@ export function createResourceIndex(
         pendingPermissions: agent.pendingPermissions,
         updatedAt: agent.updatedAt,
       });
+    };
+    const candidateAgents = [...(agentsByResourceId.get(resourceId) ?? [])];
+    for (const workspace of matchingWorkspaces) {
+      candidateAgents.push(...(agentsByWorkspaceId.get(workspace.id) ?? []));
+    }
+    candidateAgents.sort(
+      (left, right) =>
+        (agentDirectoryOrder.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
+        (agentDirectoryOrder.get(right.id) ?? Number.MAX_SAFE_INTEGER),
+    );
+    for (const agent of candidateAgents) {
+      appendAgent(agent);
     }
 
     return {

@@ -1,9 +1,11 @@
+import type { PaseoAgentUpdate, PaseoWorkspaceUpdate } from "@getpaseo/client";
 import type { PluginHostProps, PluginSurfaceProps } from "@getpaseo/plugin";
 import { usePaseo, useRpc } from "@getpaseo/plugin";
 import { useToast } from "@getpaseo/plugin/react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  FlatList,
   Linking,
   Pressable,
   ScrollView,
@@ -15,8 +17,11 @@ import {
   adjustPendingResourceCount,
   ensureResourceWorkspaceRpc,
   type GitHubResource,
+  githubResourceVersion,
+  isGitHubResourceDetailStale,
   type LifecycleState,
   listResourcesRpc,
+  mergeDetailedResource,
   mergeRefreshedResource,
   normalizeGitHubRepository,
   openExternalUrl,
@@ -24,9 +29,13 @@ import {
 } from "./github-workbench.shared";
 import { useTranslation } from "./i18n/context";
 import {
+  applyAgentUpdate,
+  applyWorkspaceUpdate,
   createResourceIndex,
   type PaseoDirectorySnapshot,
   type ResourceClassification,
+  toAgentSnapshot,
+  toWorkspaceSnapshot,
   type WorkspaceSnapshot,
 } from "./resource-index.shared";
 
@@ -39,6 +48,22 @@ type WorkbenchProps = PluginSurfaceProps & {
 type ContentTab = "all" | "issue" | "pull-request" | "mine" | "review";
 type OwnershipFilter = "all" | "mine" | "assigned" | "review";
 type StatusFilter = LifecycleState;
+type ResourceDetailQueryData = {
+  resource: GitHubResource;
+  summaryVersion: string;
+};
+type DirectoryFetchTransaction = {
+  workspaceUpdates: PaseoWorkspaceUpdate[];
+  agentUpdates: PaseoAgentUpdate[];
+};
+const WORKBENCH_STALE_TIME_MS = 5 * 60_000;
+const STABLE_WORKBENCH_STALE_TIME_MS = 30 * 60_000;
+const RESOURCE_DETAIL_STALE_TIME_MS = 10 * 60_000;
+const DIRECTORY_RECONCILE_INTERVAL_MS = 15 * 60_000;
+
+function resourceDetailQueryKey(hostId: string, resourceKey: string | null) {
+  return ["github-workbench", hostId, "resource-detail", resourceKey] as const;
+}
 export function clampWorkbenchListWidth(
   availableWidth: number,
   requestedWidth: number,
@@ -63,80 +88,129 @@ function usePaseoDirectory(hostId: string) {
   const paseo = usePaseo();
   const queryClient = useQueryClient();
   const queryKey = useMemo(
-    () => ["github-workbench", hostId, "directory"],
+    () => ["github-workbench", hostId, "directory"] as const,
     [hostId],
   );
+  const workspaceSubscriptionId = useMemo(
+    () => `github-workbench:${hostId}:workspaces`,
+    [hostId],
+  );
+  const agentSubscriptionId = useMemo(
+    () => `github-workbench:${hostId}:agents`,
+    [hostId],
+  );
+  const [subscriptionsReadyHost, setSubscriptionsReadyHost] = useState<
+    string | null
+  >(null);
+  const fetchTransactions = useRef<Set<DirectoryFetchTransaction>>(new Set());
   const query = useQuery({
     queryKey,
-    staleTime: 0,
+    enabled: subscriptionsReadyHost === hostId,
+    staleTime: WORKBENCH_STALE_TIME_MS,
+    refetchInterval: DIRECTORY_RECONCILE_INTERVAL_MS,
+    refetchIntervalInBackground: false,
     queryFn: async () => {
-      const workspaces: WorkspaceSnapshot[] = [];
-      const agents: PaseoDirectorySnapshot["agents"] = [];
-      let workspaceCursor: string | undefined;
-      for (let page = 0; page < 10; page += 1) {
-        const response = await paseo.workspaces.list({
-          page: {
-            limit: 200,
-            ...(workspaceCursor ? { cursor: workspaceCursor } : {}),
-          },
-        });
-        workspaces.push(
-          ...response.entries.map((workspace) => ({
-            id: workspace.id,
-            projectId: workspace.projectId,
-            projectDisplayName: workspace.projectDisplayName,
-            name: workspace.name,
-            archivingAt: workspace.archivingAt,
-            remoteUrl: workspace.gitRuntime?.remoteUrl ?? null,
-            pullRequestNumber: workspace.githubRuntime?.pullRequest?.number,
-            worktreeSlug: workspace.worktreeSlug,
-            activityAt: workspace.activityAt,
-          })),
-        );
-        workspaceCursor = response.pageInfo.nextCursor ?? undefined;
-        if (!workspaceCursor) break;
+      const transaction: DirectoryFetchTransaction = {
+        workspaceUpdates: [],
+        agentUpdates: [],
+      };
+      fetchTransactions.current.add(transaction);
+      try {
+        const workspacesPromise = (async () => {
+          const workspaces = new Map<string, WorkspaceSnapshot>();
+          let cursor: string | undefined;
+          for (let page = 0; page < 10; page += 1) {
+            const response = await paseo.workspaces.list({
+              ...(!cursor
+                ? { subscribe: { subscriptionId: workspaceSubscriptionId } }
+                : {}),
+              page: {
+                limit: 200,
+                ...(cursor ? { cursor } : {}),
+              },
+            });
+            for (const workspace of response.entries) {
+              const snapshot = toWorkspaceSnapshot(workspace);
+              workspaces.set(snapshot.id, snapshot);
+            }
+            cursor = response.pageInfo.nextCursor ?? undefined;
+            if (!cursor) break;
+          }
+          return [...workspaces.values()];
+        })();
+        const agentsPromise = (async () => {
+          const agents = new Map<
+            string,
+            PaseoDirectorySnapshot["agents"][number]
+          >();
+          let cursor: string | undefined;
+          for (let page = 0; page < 10; page += 1) {
+            const response = await paseo.agents.list({
+              ...(!cursor
+                ? { subscribe: { subscriptionId: agentSubscriptionId } }
+                : {}),
+              page: { limit: 200, ...(cursor ? { cursor } : {}) },
+            });
+            for (const { agent } of response.entries) {
+              const snapshot = toAgentSnapshot(agent);
+              agents.set(snapshot.id, snapshot);
+            }
+            cursor = response.pageInfo.nextCursor ?? undefined;
+            if (!cursor) break;
+          }
+          return [...agents.values()];
+        })();
+        const [workspacesResult, agentsResult] = await Promise.allSettled([
+          workspacesPromise,
+          agentsPromise,
+        ]);
+        if (workspacesResult.status === "rejected") {
+          throw workspacesResult.reason;
+        }
+        if (agentsResult.status === "rejected") {
+          throw agentsResult.reason;
+        }
+        const { value: workspaces } = workspacesResult;
+        const { value: agents } = agentsResult;
+        let snapshot = { workspaces, agents } satisfies PaseoDirectorySnapshot;
+        for (const update of transaction.workspaceUpdates) {
+          snapshot = applyWorkspaceUpdate(snapshot, update);
+        }
+        for (const update of transaction.agentUpdates) {
+          snapshot = applyAgentUpdate(snapshot, update);
+        }
+        return snapshot;
+      } finally {
+        fetchTransactions.current.delete(transaction);
       }
-      let agentCursor: string | undefined;
-      for (let page = 0; page < 10; page += 1) {
-        const response = await paseo.agents.list({
-          page: { limit: 200, ...(agentCursor ? { cursor: agentCursor } : {}) },
-        });
-        agents.push(
-          ...response.entries.map(({ agent }) => ({
-            id: agent.id,
-            workspaceId: agent.workspaceId,
-            title: agent.title,
-            status: agent.status,
-            requiresAttention: agent.requiresAttention ?? false,
-            attentionReason: agent.attentionReason ?? null,
-            pendingPermissions: agent.pendingPermissions.length,
-            updatedAt: agent.updatedAt,
-            labels: agent.labels,
-          })),
-        );
-        agentCursor = response.pageInfo.nextCursor ?? undefined;
-        if (!agentCursor) break;
-      }
-      return { workspaces, agents } satisfies PaseoDirectorySnapshot;
     },
   });
   useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const invalidate = () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(
-        () => queryClient.invalidateQueries({ queryKey }),
-        500,
+    const stopWorkspaces = paseo.workspaces.subscribe((update) => {
+      for (const transaction of fetchTransactions.current) {
+        transaction.workspaceUpdates.push(update);
+      }
+      queryClient.setQueryData<PaseoDirectorySnapshot>(queryKey, (snapshot) =>
+        snapshot ? applyWorkspaceUpdate(snapshot, update) : snapshot,
       );
-    };
-    const stopWorkspaces = paseo.workspaces.subscribe(invalidate);
-    const stopAgents = paseo.agents.subscribe(invalidate);
+    });
+    const stopAgents = paseo.agents.subscribe((update) => {
+      for (const transaction of fetchTransactions.current) {
+        transaction.agentUpdates.push(update);
+      }
+      queryClient.setQueryData<PaseoDirectorySnapshot>(queryKey, (snapshot) =>
+        snapshot ? applyAgentUpdate(snapshot, update) : snapshot,
+      );
+    });
+    setSubscriptionsReadyHost(hostId);
     return () => {
-      if (timer) clearTimeout(timer);
       stopWorkspaces();
       stopAgents();
+      setSubscriptionsReadyHost((current) =>
+        current === hostId ? null : current,
+      );
     };
-  }, [paseo, queryClient, queryKey]);
+  }, [hostId, paseo, queryClient, queryKey]);
   return query;
 }
 
@@ -394,6 +468,8 @@ function DetailPane({
   onEnsure,
   onRefresh,
   refreshing,
+  detailLoading,
+  detailError,
   onBack,
 }: {
   resource: GitHubResource | null;
@@ -403,6 +479,8 @@ function DetailPane({
   onEnsure: (resource: GitHubResource) => void;
   onRefresh: (resource: GitHubResource) => void;
   refreshing: boolean;
+  detailLoading?: boolean;
+  detailError?: string | null;
   onBack?: () => void;
 }) {
   const { t } = useTranslation();
@@ -626,6 +704,16 @@ function DetailPane({
         </View>
       ) : null}
       <View style={{ backgroundColor: theme.colors.border, height: 1 }} />
+      {detailLoading ? (
+        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+          {t("workbench.loading")}
+        </Text>
+      ) : null}
+      {detailError ? (
+        <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>
+          {detailError}
+        </Text>
+      ) : null}
       <Body body={resource.body} theme={theme} />
       {resource.kind === "pull-request" ? (
         <View style={{ gap: 7 }}>
@@ -1054,9 +1142,15 @@ export function Workbench({
   ] as const;
   const scopeKey =
     scope.scope === "repository" ? `repository:${scope.repository}` : "account";
+  const workbenchRefreshIntervalMs =
+    status === "open"
+      ? WORKBENCH_STALE_TIME_MS
+      : STABLE_WORKBENCH_STALE_TIME_MS;
   const query = useQuery({
     queryKey,
-    refetchInterval: 60_000,
+    staleTime: workbenchRefreshIntervalMs,
+    refetchInterval: workbenchRefreshIntervalMs,
+    refetchIntervalInBackground: false,
     queryFn: () =>
       listResources(
         scope.scope === "repository"
@@ -1126,6 +1220,60 @@ export function Workbench({
   );
   const selected =
     rows.find((item) => item.resource.key === selectedKey)?.resource ?? null;
+  const selectedDetailQuery = useQuery({
+    queryKey: resourceDetailQueryKey(host.id, selected?.key ?? null),
+    enabled: selected !== null,
+    staleTime: RESOURCE_DETAIL_STALE_TIME_MS,
+    gcTime: RESOURCE_DETAIL_STALE_TIME_MS,
+    queryFn: async () => {
+      if (!selected) throw new Error("No GitHub resource is selected.");
+      const summaryVersion = githubResourceVersion(selected);
+      const detail = await refreshResource({
+        kind: selected.kind,
+        repository: selected.repository,
+        number: selected.number,
+      });
+      return { ...detail, summaryVersion } satisfies ResourceDetailQueryData;
+    },
+  });
+  const detailQueryData = selectedDetailQuery.data;
+  const detailResource = detailQueryData?.resource;
+  const selectedResourceKey = selected?.key ?? null;
+  const selectedSummaryVersion = selected
+    ? githubResourceVersion(selected)
+    : null;
+  const detailVersionMismatch = Boolean(
+    detailQueryData &&
+      detailQueryData.summaryVersion !== selectedSummaryVersion,
+  );
+  const detailIsBehindSummary = Boolean(
+    selected &&
+      detailResource &&
+      (detailVersionMismatch ||
+        isGitHubResourceDetailStale(
+          selected,
+          detailResource,
+          detailQueryData?.summaryVersion,
+        )),
+  );
+  const selectedForDetail =
+    selected &&
+    detailResource &&
+    !detailVersionMismatch &&
+    !detailIsBehindSummary
+      ? mergeDetailedResource(selected, detailResource)
+      : selected;
+  const staleDetailVersion =
+    detailIsBehindSummary && selectedSummaryVersion
+      ? selectedSummaryVersion
+      : null;
+  useEffect(() => {
+    if (!selectedResourceKey || !staleDetailVersion) return;
+    void queryClient.invalidateQueries({
+      queryKey: resourceDetailQueryKey(host.id, selectedResourceKey),
+      refetchType: "active",
+    });
+  }, [host.id, queryClient, selectedResourceKey, staleDetailVersion]);
   useEffect(() => {
     if (
       selectedKey &&
@@ -1147,27 +1295,27 @@ export function Workbench({
           resource.reviewRequestedFromMe),
     ).length;
   const refresh = useCallback(() => {
-    queryClient
-      .fetchQuery({
-        queryKey: [...queryKey, "forced"],
-        queryFn: () =>
-          listResources(
-            scope.scope === "repository"
-              ? {
-                  scope: "repository",
-                  repository: scope.repository,
-                  state: status,
-                  forceRefresh: true,
-                }
-              : { scope: "account", state: status, forceRefresh: true },
-          ),
+    listResources(
+      scope.scope === "repository"
+        ? {
+            scope: "repository",
+            repository: scope.repository,
+            state: status,
+            forceRefresh: true,
+          }
+        : { scope: "account", state: status, forceRefresh: true },
+    )
+      .then((data) => {
+        queryClient.setQueryData(queryKey, data);
       })
-      .then(() => query.refetch())
       .catch(() => undefined);
-  }, [listResources, query, queryClient, queryKey, scope, status]);
+  }, [listResources, queryClient, queryKey, scope, status]);
   const refreshItem = useCallback(
     (resource: GitHubResource) => {
       setRefreshingKey(resource.key);
+      void queryClient.cancelQueries({
+        queryKey: resourceDetailQueryKey(host.id, resource.key),
+      });
       refreshResource({
         kind: resource.kind,
         repository: resource.repository,
@@ -1188,6 +1336,13 @@ export function Workbench({
                   }
                 : current,
           );
+          queryClient.setQueryData(
+            resourceDetailQueryKey(host.id, resource.key),
+            {
+              resource: refreshed,
+              summaryVersion: githubResourceVersion(refreshed),
+            } satisfies ResourceDetailQueryData,
+          );
           setRefreshingKey(null);
         })
         .catch(() => {
@@ -1195,7 +1350,7 @@ export function Workbench({
           toast.error(t("resource.toasts.refreshFailed"));
         });
     },
-    [queryClient, queryKey, refreshResource, t, toast],
+    [host.id, queryClient, queryKey, refreshResource, t, toast],
   );
   const ensure = useCallback(
     (resource: GitHubResource) => {
@@ -1426,7 +1581,7 @@ export function Workbench({
           {warning.message}
         </Text>
       ))}
-      {query.isLoading || directory.isLoading ? (
+      {query.isLoading ? (
         <Text
           accessibilityLiveRegion="polite"
           style={{ color: theme.colors.foregroundMuted, padding: 16 }}
@@ -1444,35 +1599,52 @@ export function Workbench({
             : t("workbench.unableToLoad")}
         </Text>
       ) : null}
-      <ScrollView
-        contentContainerStyle={{ gap: 2, padding: 8 }}
-        style={{ flex: 1 }}
-      >
-        {rows.map(({ resource }) => (
+      <FlatList
+        data={rows}
+        keyExtractor={({ resource }) => resource.key}
+        renderItem={({ item }) => (
           <ListRow
-            key={resource.key}
-            resource={resource}
-            selected={selectedKey === resource.key}
-            onPress={() => setSelectedKey(resource.key)}
+            resource={item.resource}
+            selected={selectedKey === item.resource.key}
+            onPress={() => setSelectedKey(item.resource.key)}
             theme={theme}
           />
-        ))}
-        {!query.isLoading && rows.length === 0 ? (
-          <Text style={{ color: theme.colors.foregroundMuted, padding: 14 }}>
-            {t("workbench.empty")}
-          </Text>
-        ) : null}
-      </ScrollView>
+        )}
+        initialNumToRender={20}
+        maxToRenderPerBatch={20}
+        windowSize={7}
+        contentContainerStyle={{ gap: 2, padding: 8 }}
+        style={{ flex: 1 }}
+        ListEmptyComponent={
+          !query.isLoading ? (
+            <Text style={{ color: theme.colors.foregroundMuted, padding: 14 }}>
+              {t("workbench.empty")}
+            </Text>
+          ) : null
+        }
+      />
     </View>
   );
   return (
     <View style={{ backgroundColor: theme.colors.surface0, flex: 1 }}>
       {showingDetail ? (
         <DetailPane
-          resource={selected}
+          resource={selectedForDetail}
           theme={theme}
           navigation={navigation}
-          refreshing={refreshingKey === selected?.key}
+          refreshing={
+            refreshingKey === selected?.key || selectedDetailQuery.isFetching
+          }
+          detailLoading={
+            selectedDetailQuery.isFetching && !selectedDetailQuery.data
+          }
+          detailError={
+            selectedDetailQuery.error instanceof Error
+              ? selectedDetailQuery.error.message
+              : selectedDetailQuery.error
+                ? t("workbench.unableToLoad")
+                : null
+          }
           onRefresh={refreshItem}
           ensuring={
             selected ? (pendingCounts.get(selected.key) ?? 0) > 0 : false
@@ -1491,10 +1663,23 @@ export function Workbench({
             }}
           >
             <DetailPane
-              resource={selected}
+              resource={selectedForDetail}
               theme={theme}
               navigation={navigation}
-              refreshing={refreshingKey === selected?.key}
+              refreshing={
+                refreshingKey === selected?.key ||
+                selectedDetailQuery.isFetching
+              }
+              detailLoading={
+                selectedDetailQuery.isFetching && !selectedDetailQuery.data
+              }
+              detailError={
+                selectedDetailQuery.error instanceof Error
+                  ? selectedDetailQuery.error.message
+                  : selectedDetailQuery.error
+                    ? t("workbench.unableToLoad")
+                    : null
+              }
               onRefresh={refreshItem}
               ensuring={
                 selected ? (pendingCounts.get(selected.key) ?? 0) > 0 : false
@@ -1575,10 +1760,23 @@ export function Workbench({
           </View>
           <View style={{ backgroundColor: theme.colors.surface0, flex: 1 }}>
             <DetailPane
-              resource={selected}
+              resource={selectedForDetail}
               theme={theme}
               navigation={navigation}
-              refreshing={refreshingKey === selected?.key}
+              refreshing={
+                refreshingKey === selected?.key ||
+                selectedDetailQuery.isFetching
+              }
+              detailLoading={
+                selectedDetailQuery.isFetching && !selectedDetailQuery.data
+              }
+              detailError={
+                selectedDetailQuery.error instanceof Error
+                  ? selectedDetailQuery.error.message
+                  : selectedDetailQuery.error
+                    ? t("workbench.unableToLoad")
+                    : null
+              }
               onRefresh={refreshItem}
               ensuring={
                 selected ? (pendingCounts.get(selected.key) ?? 0) > 0 : false
@@ -1595,6 +1793,7 @@ export function Workbench({
 export function useProjectRepositories(
   projectId: string | null,
   hostId: string,
+  initialRepository: string | null = null,
 ) {
   const paseo = usePaseo();
   const queryClient = useQueryClient();
@@ -1604,18 +1803,19 @@ export function useProjectRepositories(
   );
   const query = useQuery({
     queryKey,
-    enabled: Boolean(projectId),
+    enabled: Boolean(projectId) && !initialRepository,
+    staleTime: WORKBENCH_STALE_TIME_MS,
     queryFn: async () => {
       if (!projectId) return [];
       const repositories = new Set<string>();
       let cursor: string | undefined;
       for (let page = 0; page < 10; page += 1) {
         const response = await paseo.workspaces.list({
+          filter: { projectId },
           page: { limit: 200, ...(cursor ? { cursor } : {}) },
         });
         for (const workspace of response.entries) {
-          if (workspace.projectId !== projectId || workspace.archivingAt)
-            continue;
+          if (workspace.archivingAt) continue;
           const repository = normalizeGitHubRepository(
             workspace.gitRuntime?.remoteUrl,
           );
@@ -1628,8 +1828,13 @@ export function useProjectRepositories(
     },
   });
   useEffect(() => {
+    if (initialRepository) return;
     const invalidate = () => queryClient.invalidateQueries({ queryKey });
     return paseo.workspaces.subscribe(invalidate);
-  }, [paseo, queryClient, queryKey]);
-  return query.data ?? [];
+  }, [initialRepository, paseo, queryClient, queryKey]);
+  return useMemo(() => {
+    if (initialRepository) return [initialRepository];
+    const loaded = query.data ?? [];
+    return loaded;
+  }, [initialRepository, query.data]);
 }

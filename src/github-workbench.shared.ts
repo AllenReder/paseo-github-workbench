@@ -298,6 +298,51 @@ export function mergeRefreshedResource(
   };
 }
 
+/**
+ * Adds fields that are only requested by the on-demand detail query while
+ * keeping the list summary authoritative for all shared fields.
+ */
+export function mergeDetailedResource(
+  summary: GitHubResource,
+  detail: GitHubResource,
+): GitHubResource {
+  if (summary.key !== detail.key || summary.kind !== detail.kind)
+    return summary;
+  if (summary.kind === "pull-request" && detail.kind === "pull-request") {
+    return {
+      ...summary,
+      body: detail.body,
+      checkDetails: detail.checkDetails,
+    };
+  }
+  return { ...summary, body: detail.body };
+}
+
+export function githubResourceVersion(resource: GitHubResource): string {
+  return `${resource.key}:${resource.updatedAt}:${
+    resource.kind === "pull-request" ? resource.checksStatus : ""
+  }`;
+}
+
+export function isGitHubResourceDetailStale(
+  summary: GitHubResource,
+  detail: GitHubResource,
+  fetchedForSummaryVersion?: string,
+): boolean {
+  if (summary.key !== detail.key || summary.kind !== detail.kind) return true;
+  if (detail.updatedAt < summary.updatedAt) return true;
+  if (detail.updatedAt > summary.updatedAt) return false;
+  if (
+    summary.kind !== "pull-request" ||
+    detail.kind !== "pull-request" ||
+    detail.checksStatus === summary.checksStatus ||
+    fetchedForSummaryVersion === githubResourceVersion(summary)
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function issueBranchSlug(number: number, title: string): string {
   const slug =
     title

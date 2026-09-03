@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   adjustPendingResourceCount,
+  githubResourceVersion,
+  isGitHubResourceDetailStale,
   issueBranchSlug,
+  mergeDetailedResource,
   mergeRefreshedResource,
   normalizeGitHubRepository,
   openExternalUrl,
@@ -183,6 +186,70 @@ describe("GitHub workbench shared primitives", () => {
     if (merged.kind === "pull-request") {
       expect(merged.reviewRequestedFromMe).toBe(true);
     }
+  });
+
+  test("merges only detail-only fields over the current summary", () => {
+    const summary = pullRequest({
+      title: "Current title",
+      updatedAt: "2026-02-02T00:00:00Z",
+      body: "",
+      checkDetails: [],
+      labels: ["current"],
+    });
+    const detail = pullRequest({
+      title: "Stale title",
+      updatedAt: "2026-02-01T00:00:00Z",
+      body: "Loaded body",
+      checkDetails: [{ name: "CI", status: "success" }],
+      labels: ["stale"],
+    });
+
+    const merged = mergeDetailedResource(summary, detail);
+    expect(merged.title).toBe("Current title");
+    expect(merged.labels).toEqual(["current"]);
+    expect(merged.body).toBe("Loaded body");
+    if (merged.kind === "pull-request") {
+      expect(merged.checkDetails).toEqual([{ name: "CI", status: "success" }]);
+    }
+  });
+
+  test("accepts a check status advance fetched for the current summary", () => {
+    const summary = pullRequest({
+      updatedAt: "2026-02-01T00:00:00Z",
+      checksStatus: "pending",
+    });
+    const detail = pullRequest({
+      updatedAt: "2026-02-01T00:00:00Z",
+      checksStatus: "success",
+    });
+
+    expect(isGitHubResourceDetailStale(summary, detail)).toBe(true);
+    expect(
+      isGitHubResourceDetailStale(
+        summary,
+        detail,
+        githubResourceVersion(summary),
+      ),
+    ).toBe(false);
+    expect(
+      isGitHubResourceDetailStale(
+        summary,
+        detail,
+        githubResourceVersion(detail),
+      ),
+    ).toBe(true);
+    expect(
+      isGitHubResourceDetailStale(
+        summary,
+        pullRequest({
+          updatedAt: "2026-02-02T00:00:00Z",
+          checksStatus: "success",
+        }),
+      ),
+    ).toBe(false);
+    expect(githubResourceVersion(summary)).not.toBe(
+      githubResourceVersion(detail),
+    );
   });
 
   test("formats accessibility labels properly", () => {

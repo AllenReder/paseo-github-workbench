@@ -22,6 +22,7 @@ mock.module("@getpaseo/plugin/react-native", () => ({
 
 mock.module("react-native", () => ({
   Clipboard: { setString: () => {} },
+  FlatList: "FlatList",
   Linking: { openURL: async () => true },
   Pressable: "Pressable",
   ScrollView: "ScrollView",
