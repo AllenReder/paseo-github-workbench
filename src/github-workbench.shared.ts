@@ -327,6 +327,7 @@ export function githubResourceVersion(resource: GitHubResource): string {
 export function isGitHubResourceDetailStale(
   summary: GitHubResource,
   detail: GitHubResource,
+  fetchedForSummaryVersion?: string,
 ): boolean {
   if (summary.key !== detail.key || summary.kind !== detail.kind) return true;
   if (detail.updatedAt < summary.updatedAt) return true;
@@ -334,7 +335,8 @@ export function isGitHubResourceDetailStale(
   if (
     summary.kind !== "pull-request" ||
     detail.kind !== "pull-request" ||
-    detail.checksStatus === summary.checksStatus
+    detail.checksStatus === summary.checksStatus ||
+    fetchedForSummaryVersion === githubResourceVersion(summary)
   ) {
     return false;
   }

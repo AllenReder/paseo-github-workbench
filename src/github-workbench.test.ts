@@ -213,23 +213,37 @@ describe("GitHub workbench shared primitives", () => {
     }
   });
 
-  test("treats a changed pull request checks status as stale detail", () => {
+  test("accepts a check status advance fetched for the current summary", () => {
     const summary = pullRequest({
       updatedAt: "2026-02-01T00:00:00Z",
-      checksStatus: "success",
+      checksStatus: "pending",
     });
     const detail = pullRequest({
       updatedAt: "2026-02-01T00:00:00Z",
-      checksStatus: "pending",
+      checksStatus: "success",
     });
 
     expect(isGitHubResourceDetailStale(summary, detail)).toBe(true);
     expect(
       isGitHubResourceDetailStale(
         summary,
+        detail,
+        githubResourceVersion(summary),
+      ),
+    ).toBe(false);
+    expect(
+      isGitHubResourceDetailStale(
+        summary,
+        detail,
+        githubResourceVersion(detail),
+      ),
+    ).toBe(true);
+    expect(
+      isGitHubResourceDetailStale(
+        summary,
         pullRequest({
           updatedAt: "2026-02-02T00:00:00Z",
-          checksStatus: "pending",
+          checksStatus: "success",
         }),
       ),
     ).toBe(false);

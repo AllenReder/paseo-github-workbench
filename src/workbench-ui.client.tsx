@@ -1250,7 +1250,11 @@ export function Workbench({
     selected &&
       detailResource &&
       (detailVersionMismatch ||
-        isGitHubResourceDetailStale(selected, detailResource)),
+        isGitHubResourceDetailStale(
+          selected,
+          detailResource,
+          detailQueryData?.summaryVersion,
+        )),
   );
   const selectedForDetail =
     selected &&
